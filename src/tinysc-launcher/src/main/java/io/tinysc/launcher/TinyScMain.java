@@ -1,0 +1,145 @@
+package io.tinysc.launcher;
+
+import io.tinysc.deployment.InspectionReport;
+import io.tinysc.deployment.WarInspector;
+import io.tinysc.kernel.ServerConfig;
+
+import java.io.PrintStream;
+import java.nio.file.Path;
+import java.nio.file.Paths;
+import java.util.LinkedHashMap;
+import java.util.Map;
+
+public final class TinyScMain {
+    private TinyScMain() {
+    }
+
+    public static void main(String[] arguments) throws Exception {
+        int exitCode = run(arguments, System.out, System.err);
+        if (exitCode != 0) {
+            System.exit(exitCode);
+        }
+    }
+
+    static int run(String[] arguments, PrintStream output, PrintStream error) throws Exception {
+        if (arguments.length == 2 && "inspect".equals(arguments[0])) {
+            inspect(Paths.get(arguments[1]), output);
+            return 0;
+        }
+        if (arguments.length > 0 && "start".equals(arguments[0])) {
+            try {
+                return start(parseOptions(arguments, 1), output, error);
+            } catch (IllegalArgumentException invalidArguments) {
+                error.println("Invalid arguments: " + invalidArguments.getMessage());
+                usage(error);
+                return 2;
+            }
+        }
+        usage(error);
+        return 2;
+    }
+
+    private static int start(Map<String, String> options, PrintStream output, PrintStream error)
+            throws Exception {
+        String warValue = options.remove("war");
+        if (warValue == null) {
+            error.println("Missing required option: --war");
+            usage(error);
+            return 2;
+        }
+        Path war = Paths.get(warValue);
+        String contextPath = option(options, "context-path", "");
+        ServerConfig config = ServerConfig.builder()
+                .bindAddress(option(options, "bind", "127.0.0.1"))
+                .port(integerOption(options, "port", 8080))
+                .contextPath(contextPath)
+                .baseDirectory(Paths.get(option(options, "base", "tinysc-base")))
+                .ioThreads(integerOption(options, "io-threads", Math.max(1, Math.min(2,
+                        Runtime.getRuntime().availableProcessors()))))
+                .workerThreads(integerOption(options, "workers",
+                        Math.max(4, Runtime.getRuntime().availableProcessors() * 2)))
+                .workerQueueCapacity(integerOption(options, "worker-queue", 1024))
+                .build();
+        if (!options.isEmpty()) {
+            throw new IllegalArgumentException("Unknown option: --"
+                    + options.keySet().iterator().next());
+        }
+
+        final TinyScServer server = new TinyScServer(config, war);
+        int port = server.start();
+        Runtime.getRuntime().addShutdownHook(new Thread(() -> {
+            try {
+                server.close();
+            } catch (Exception failure) {
+                failure.printStackTrace(System.err);
+            }
+        }, "tinysc-shutdown"));
+        output.println("tinysc ready"
+                + " bind=" + config.bindAddress()
+                + " port=" + port
+                + " context=" + (config.contextPath().isEmpty() ? "/" : config.contextPath())
+                + " readyMs=" + server.readyMillis()
+                + " prepareMs=" + server.prepareMillis()
+                + " expansionCacheHit=" + server.expansionCacheHit()
+                + " sha256=" + server.sourceSha256());
+        server.await();
+        return 0;
+    }
+
+    private static void inspect(Path war, PrintStream output) throws Exception {
+        InspectionReport report = new WarInspector().inspect(war);
+        output.println("WAR: " + report.source());
+        output.println("SHA-256: " + report.sha256());
+        output.println("Size: " + report.sourceBytes() + " bytes");
+        output.println("Bundled class bytecode: " + bytecodeVersion(report));
+        output.println("Servlet namespace: "
+                + report.namespace().name().toLowerCase(java.util.Locale.ROOT));
+        output.println("web.xml: " + report.webXmlVersion());
+        output.println("Recommended runtime: " + report.recommendedRuntime());
+        for (String warning : report.warnings()) {
+            output.println("Warning: " + warning);
+        }
+    }
+
+    private static String bytecodeVersion(InspectionReport report) {
+        String minimum = InspectionReport.javaVersionForClassMajor(report.minimumClassMajor());
+        String maximum = InspectionReport.javaVersionForClassMajor(report.maximumClassMajor());
+        if (minimum.equals(maximum)) {
+            return maximum;
+        }
+        return minimum + ".." + maximum;
+    }
+
+    private static Map<String, String> parseOptions(String[] arguments, int offset) {
+        Map<String, String> result = new LinkedHashMap<String, String>();
+        for (int index = offset; index < arguments.length; index++) {
+            String option = arguments[index];
+            if (!option.startsWith("--") || option.length() == 2 || index + 1 >= arguments.length) {
+                throw new IllegalArgumentException("Expected --name value, found: " + option);
+            }
+            String name = option.substring(2);
+            if (result.put(name, arguments[++index]) != null) {
+                throw new IllegalArgumentException("Duplicate option: --" + name);
+            }
+        }
+        return result;
+    }
+
+    private static String option(Map<String, String> options, String name, String defaultValue) {
+        String value = options.remove(name);
+        return value == null ? defaultValue : value;
+    }
+
+    private static int integerOption(Map<String, String> options, String name, int defaultValue) {
+        String value = options.remove(name);
+        return value == null ? defaultValue : Integer.parseInt(value);
+    }
+
+    private static void usage(PrintStream output) {
+        output.println("Usage:");
+        output.println("  tinysc inspect <app.war>");
+        output.println("  tinysc start --war <app.war> [--port 8080] [--bind 127.0.0.1]");
+        output.println("               [--context-path /app] [--base tinysc-base]");
+        output.println("               [--io-threads N] [--workers N] [--worker-queue N]");
+    }
+}

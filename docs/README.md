@@ -1,0 +1,26 @@
+# tinysc 文档索引
+
+文档与源码分开维护。根目录 `README.md` 只作为项目入口，规范性文档均位于本目录。
+
+| 文档 | 内容 |
+|---|---|
+| [architecture.md](architecture.md) | 系统边界、模块、生命周期和请求链路 |
+| [tomcat-source-map.md](tomcat-source-map.md) | Tomcat 源码职责分类与 tinysc 取舍 |
+| [product-positioning.md](product-positioning.md) | 相对 Tomcat 的可验证亮点、边界和声明规则 |
+| [development.md](development.md) | 构建环境、目录规则和开发流程 |
+| [contributing.md](contributing.md) | 贡献流程、代码边界与行为准则 |
+| [governance.md](governance.md) | 决策、维护、支持与开源发布门禁 |
+| [changelog.md](changelog.md) | 用户可见变更和当前已知限制 |
+| [testing.md](testing.md) | 单测、契约、真实 WAR 与差分验收 |
+| [performance.md](performance.md) | 与 Tomcat 的公平基准、性能预算和结果格式 |
+| [operations.md](operations.md) | 启动、停止、目录和故障排查 |
+| [configuration.md](configuration.md) | CLI 参数、默认值、固定限制与生产建议 |
+| [compatibility.md](compatibility.md) | 版本选择与兼容承诺 |
+| [security.md](security.md) | 威胁模型和安全门禁 |
+| [release.md](release.md) | 分支、版本、制品与发布检查表 |
+| [roadmap.md](roadmap.md) | alpha 到 2.x 的里程碑 |
+| [benchmarks/2026-07-21-probe-vs-tomcat-8.5.100.md](benchmarks/2026-07-21-probe-vs-tomcat-8.5.100.md) | 首轮同机性能正反结果 |
+| [acceptance/2026-07-21-legacy-war-acceptance.md](acceptance/2026-07-21-legacy-war-acceptance.md) | 两个匿名化真实 WAR 的分阶段验收证据 |
+| [adr/README.md](adr/README.md) | 架构决策记录索引 |
+
+文档必须与可执行行为同步。尚未实现的能力统一标记为“计划”，不得写成已支持。
