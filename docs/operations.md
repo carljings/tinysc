@@ -23,6 +23,8 @@ java -jar tinysc-1.0.0-alpha-SNAPSHOT.jar inspect /path/to/app.war
 
 未知、重复或缺少值的参数会以退出码 2 拒绝；不会静默忽略拼写错误。`--war` 当前也接受一个
 exploded WebApp 目录，可用于开发测试跳过 WAR 打包与展开。
+未指定 `--base` 时，当前工作目录就是实例根目录，日志默认写入工程的 `logs/tinysc.log`。
+生产环境应显式传入每个实例独立的 `--base`。
 
 ## 运行目录
 

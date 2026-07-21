@@ -19,6 +19,11 @@ Known limitations；提交历史不能替代发布说明。
 - 启动期即生效的终端/文件双写日志：默认保存到 `--base/logs/tinysc.log`，按 64 MiB
   轮转并保留 5 份备份。
 
+### Changed
+
+- 未显式指定 `--base` 时使用当前工作目录，使本地开发日志与缓存分别进入工程
+  `logs/` 和 `work/`。
+
 ### Fixed
 
 - 未映射静态请求现在进入匹配的 Filter 链，静态 forward 按 FORWARD dispatcher 重新匹配。

@@ -11,7 +11,7 @@ tinysc 1.x alpha 只接受命令行配置。未知参数、重复参数、缺少
 | `--bind` | 否 | `127.0.0.1` | 监听地址；显式设为 `0.0.0.0` 才对外网卡开放 |
 | `--port` | 否 | `8080` | HTTP 端口；测试代码可用 `0` 请求随机端口 |
 | `--context-path` | 否 | 根 Context | 空值或 `/` 表示根；非根值必须以 `/` 开头且不能以 `/` 结尾 |
-| `--base` | 否 | `tinysc-base` | 展开缓存和 `logs/tinysc.log` 的实例根目录 |
+| `--base` | 否 | `.` | 当前工作目录；展开缓存和 `logs/tinysc.log` 的实例根目录 |
 | `--io-threads` | 否 | `min(2, CPU)`，至少 1 | Netty I/O 线程数 |
 | `--workers` | 否 | `max(4, CPU × 2)` | Servlet/Filter 工作线程数 |
 | `--worker-queue` | 否 | `1024` | 有界工作队列容量；饱和时新请求返回 503 |

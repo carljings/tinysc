@@ -63,6 +63,39 @@ class LauncherLoggingIntegrationTest {
         }
     }
 
+    @Test
+    void usesWorkingDirectoryAsDefaultBase() throws Exception {
+        Path launcher = Paths.get(System.getProperty("tinysc.launcher.jar")).toAbsolutePath();
+        Path java = Paths.get(System.getProperty("java.home"), "bin", "java");
+        Path base = temporaryDirectory.resolve("default-base");
+        Path console = temporaryDirectory.resolve("default-base-console.log");
+        Path log = base.resolve("logs").resolve("tinysc.log");
+        Files.createDirectories(base);
+
+        Process process = new ProcessBuilder(Arrays.asList(
+                java.toString(),
+                "-jar", launcher.toString(),
+                "start",
+                "--war", base.resolve("missing.war").toString(),
+                "--port", "0"))
+                .directory(base.toFile())
+                .redirectErrorStream(true)
+                .redirectOutput(console.toFile())
+                .start();
+        try {
+            assertTrue(process.waitFor(10, TimeUnit.SECONDS),
+                    "Launcher did not stop after startup failure");
+            assertTrue(process.exitValue() != 0, read(console));
+            assertTrue(Files.isRegularFile(log), read(console));
+            assertTrue(read(log).contains("tinysc starting"), read(log));
+        } finally {
+            if (process.isAlive()) {
+                process.destroyForcibly();
+                process.waitFor(5, TimeUnit.SECONDS);
+            }
+        }
+    }
+
     private static void awaitLogMessage(Path log, String message, long timeout, TimeUnit unit)
             throws Exception {
         long deadline = System.nanoTime() + unit.toNanos(timeout);

@@ -62,7 +62,7 @@ public final class TinyScMain {
                 .bindAddress(option(options, "bind", "127.0.0.1"))
                 .port(integerOption(options, "port", 8080))
                 .contextPath(contextPath)
-                .baseDirectory(Paths.get(option(options, "base", "tinysc-base")))
+                .baseDirectory(Paths.get(option(options, "base", ".")))
                 .ioThreads(integerOption(options, "io-threads", Math.max(1, Math.min(2,
                         Runtime.getRuntime().availableProcessors()))))
                 .workerThreads(integerOption(options, "workers",
@@ -217,7 +217,7 @@ public final class TinyScMain {
         output.println("Usage:");
         output.println("  tinysc inspect <app.war>");
         output.println("  tinysc start --war <app.war> [--port 8080] [--bind 127.0.0.1]");
-        output.println("               [--context-path /app] [--base tinysc-base]");
+        output.println("               [--context-path /app] [--base .]");
         output.println("               [--io-threads N] [--workers N] [--worker-queue N]");
     }
 }
