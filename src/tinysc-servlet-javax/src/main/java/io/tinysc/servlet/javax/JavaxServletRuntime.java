@@ -28,6 +28,8 @@ import javax.servlet.ServletRequestEvent;
 import javax.servlet.ServletRequestListener;
 import javax.servlet.ServletResponse;
 import javax.servlet.ServletSecurityElement;
+import javax.servlet.http.HttpServlet;
+import javax.servlet.http.HttpServletRequest;
 import javax.servlet.http.HttpServletResponse;
 import javax.servlet.http.HttpSessionAttributeListener;
 import javax.servlet.http.HttpSessionBindingEvent;
@@ -36,9 +38,13 @@ import javax.servlet.http.HttpSessionIdListener;
 import javax.servlet.http.HttpSessionListener;
 import java.io.IOException;
 import java.io.InputStream;
+import java.net.JarURLConnection;
+import java.net.URISyntaxException;
+import java.net.URL;
+import java.net.URLConnection;
 import java.nio.file.Files;
 import java.nio.file.Path;
-import java.nio.file.attribute.FileTime;
+import java.nio.file.Paths;
 import java.time.Duration;
 import java.time.ZoneOffset;
 import java.time.format.DateTimeFormatter;
@@ -56,6 +62,8 @@ import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
+import java.util.jar.JarEntry;
+import java.util.jar.JarFile;
 
 public final class JavaxServletRuntime implements WebAppRuntime {
     private static final DateTimeFormatter HTTP_DATE = DateTimeFormatter.RFC_1123_DATE_TIME;
@@ -77,6 +85,7 @@ public final class JavaxServletRuntime implements WebAppRuntime {
             new ArrayList<WebAppDescriptor.ServletMapping>();
     private final List<WebAppDescriptor.FilterMapping> filterMappings =
             new ArrayList<WebAppDescriptor.FilterMapping>();
+    private final Servlet staticResourceServlet = new StaticResourceServlet();
     private volatile LifecycleState state = LifecycleState.NEW;
     private TinyServletContext servletContext;
     private TinySessionManager sessionManager;
@@ -116,7 +125,8 @@ public final class JavaxServletRuntime implements WebAppRuntime {
             asyncScheduler = Executors.newSingleThreadScheduledExecutor(
                     new NamedThreadFactory("tinysc-async-timeout-", true));
             servletContext = new TinyServletContext(contextPath, application.webRoot(),
-                    application.classLoader(), descriptor.contextParams(), this);
+                    application.classLoader(), application.resources(),
+                    descriptor.contextParams(), this);
             sessionManager = new TinySessionManager(
                     servletContext, descriptor.sessionTimeoutMinutes(), this);
             initializeServletContainerInitializers();
@@ -148,25 +158,21 @@ public final class JavaxServletRuntime implements WebAppRuntime {
                 return;
             }
             ServletMappingResult mapping = mapper.map(requestPath);
-            FilterSelection selection = mapping == null
-                    ? FilterSelection.EMPTY : matchingFilters(
-                    mapping.servletName(), requestPath, DispatcherType.REQUEST);
+            FilterSelection selection = matchingFilters(
+                    mapping == null ? "" : mapping.servletName(),
+                    requestPath, DispatcherType.REQUEST);
             ServletHolder mappedServlet = mapping == null ? null : servlets.get(mapping.servletName());
+            if (mapping != null && mappedServlet == null) {
+                throw new ServletException("mapping references unknown servlet: "
+                        + mapping.servletName());
+            }
             boolean asyncSupported = mappedServlet != null && mappedServlet.asyncSupported
                     && selection.asyncSupported;
             request = new TinyHttpServletRequest(exchange, response, servletContext,
                     sessionManager, mapping, requestPath, asyncSupported, asyncScheduler);
             fireRequestInitialized(request);
-            if (mapping == null) {
-                serveStatic(requestPath, exchange.request().method(), response);
-                return;
-            }
-            ServletHolder servlet = mappedServlet;
-            if (servlet == null) {
-                throw new ServletException("mapping references unknown servlet: "
-                        + mapping.servletName());
-            }
-            new ApplicationFilterChain(selection.filters, servlet.get()).doFilter(request, response);
+            Servlet servlet = mapping == null ? staticResourceServlet : mappedServlet.get();
+            new ApplicationFilterChain(selection.filters, servlet).doFilter(request, response);
         } catch (Exception failure) {
             if (request != null && request.asyncContextInternal() != null
                     && !request.asyncContextInternal().isTerminal()) {
@@ -306,11 +312,10 @@ public final class JavaxServletRuntime implements WebAppRuntime {
                 originalRequest.pushDispatch(path, query, mapping, dispatcherType);
         try {
             if (mapping == null) {
-                if (response instanceof HttpServletResponse) {
-                    ((HttpServletResponse) response).sendError(HttpServletResponse.SC_NOT_FOUND);
-                    return;
-                }
-                throw new ServletException("dispatcher target not found: " + path);
+                FilterSelection selection = matchingFilters("", path, dispatcherType);
+                new ApplicationFilterChain(selection.filters, staticResourceServlet)
+                        .doFilter(request, response);
+                return;
             }
             ServletHolder servlet = servlets.get(mapping.servletName());
             if (servlet == null) {
@@ -671,7 +676,7 @@ public final class JavaxServletRuntime implements WebAppRuntime {
         }
     }
 
-    private void serveStatic(String requestPath, String method, TinyHttpServletResponse response)
+    private void serveStatic(String requestPath, String method, HttpServletResponse response)
             throws IOException {
         if (!"GET".equals(method) && !"HEAD".equals(method)) {
             response.setHeader("Allow", "GET, HEAD");
@@ -684,46 +689,100 @@ public final class JavaxServletRuntime implements WebAppRuntime {
             response.sendError(HttpServletResponse.SC_NOT_FOUND);
             return;
         }
-        Path root = servletContext.webRoot();
-        Path resource = root.resolve(requestPath.substring(1)).normalize();
-        if (!resource.startsWith(root)) {
+        URL resourceUrl = staticResource(requestPath);
+        if (resourceUrl == null) {
             response.sendError(HttpServletResponse.SC_NOT_FOUND);
             return;
         }
-        if (Files.isDirectory(resource)) {
-            resource = welcomeResource(resource);
-        }
-        if (resource == null || !Files.isRegularFile(resource)) {
-            response.sendError(HttpServletResponse.SC_NOT_FOUND);
-            return;
-        }
-        String mimeType = servletContext.getMimeType(resource.getFileName().toString());
+        String mimeType = servletContext.getMimeType(resourceUrl.getPath());
         if (mimeType != null) {
             response.setContentType(mimeType);
         }
-        long size = Files.size(resource);
-        response.setContentLengthLong(size);
-        FileTime modified = Files.getLastModifiedTime(resource);
-        response.setHeader("Last-Modified", HTTP_DATE.format(
-                modified.toInstant().atZone(ZoneOffset.UTC)));
+        if ("jar".equals(resourceUrl.getProtocol())) {
+            serveJarResource(resourceUrl, method, response);
+            return;
+        }
+        URLConnection connection = resourceUrl.openConnection();
+        connection.setUseCaches(false);
+        long size = connection.getContentLengthLong();
+        if (size >= 0L) {
+            response.setContentLengthLong(size);
+        }
+        long modified = connection.getLastModified();
+        if (modified > 0L) {
+            response.setHeader("Last-Modified", HTTP_DATE.format(
+                    java.time.Instant.ofEpochMilli(modified).atZone(ZoneOffset.UTC)));
+        }
         if ("HEAD".equals(method)) {
             return;
         }
-        try (InputStream input = Files.newInputStream(resource)) {
-            byte[] buffer = new byte[8192];
-            int read;
-            while ((read = input.read(buffer)) >= 0) {
-                response.getOutputStream().write(buffer, 0, read);
+        try (InputStream input = connection.getInputStream()) {
+            copy(input, response);
+        }
+    }
+
+    private void serveJarResource(URL resourceUrl, String method,
+                                  HttpServletResponse response) throws IOException {
+        JarURLConnection location = (JarURLConnection) resourceUrl.openConnection();
+        Path archivePath;
+        try {
+            archivePath = Paths.get(location.getJarFileURL().toURI());
+        } catch (URISyntaxException exception) {
+            throw new IOException("invalid resource JAR URL: " + resourceUrl, exception);
+        }
+        try (JarFile archive = new JarFile(archivePath.toFile())) {
+            JarEntry entry = archive.getJarEntry(location.getEntryName());
+            if (entry == null || entry.isDirectory()) {
+                response.sendError(HttpServletResponse.SC_NOT_FOUND);
+                return;
+            }
+            if (entry.getSize() >= 0L) {
+                response.setContentLengthLong(entry.getSize());
+            }
+            if (entry.getTime() > 0L) {
+                response.setHeader("Last-Modified", HTTP_DATE.format(
+                        java.time.Instant.ofEpochMilli(entry.getTime())
+                                .atZone(ZoneOffset.UTC)));
+            }
+            if ("HEAD".equals(method)) {
+                return;
+            }
+            try (InputStream input = archive.getInputStream(entry)) {
+                copy(input, response);
             }
         }
     }
 
-    private Path welcomeResource(Path directory) {
+    private static void copy(InputStream input, HttpServletResponse response)
+            throws IOException {
+        byte[] buffer = new byte[8192];
+        int read;
+        while ((read = input.read(buffer)) >= 0) {
+            response.getOutputStream().write(buffer, 0, read);
+        }
+    }
+
+    private URL staticResource(String requestPath) throws IOException {
+        Path root = servletContext.webRoot();
+        Path file = root.resolve(requestPath.substring(1)).normalize();
+        if (!file.startsWith(root)) {
+            return null;
+        }
+        URL exact = servletContext.getResource(requestPath);
+        boolean directory = Files.isDirectory(file) || requestPath.endsWith("/")
+                || (exact != null && exact.toExternalForm().endsWith("/"));
+        if (!directory && exact == null) {
+            directory = servletContext.getResourcePaths(requestPath + "/") != null;
+        }
+        if (!directory) {
+            return exact;
+        }
+        String base = requestPath.endsWith("/") ? requestPath : requestPath + "/";
         List<String> welcomeFiles = descriptor.welcomeFiles().isEmpty()
                 ? java.util.Arrays.asList("index.html", "index.htm") : descriptor.welcomeFiles();
         for (String welcome : welcomeFiles) {
-            Path candidate = directory.resolve(welcome).normalize();
-            if (candidate.startsWith(directory) && Files.isRegularFile(candidate)) {
+            URL candidate = servletContext.getResource(base + welcome);
+            if (candidate != null && !candidate.toExternalForm().endsWith("/")) {
                 return candidate;
             }
         }
@@ -1169,10 +1228,15 @@ public final class JavaxServletRuntime implements WebAppRuntime {
         }
     }
 
-    private static final class FilterSelection {
-        private static final FilterSelection EMPTY =
-                new FilterSelection(Collections.<Filter>emptyList(), false);
+    private final class StaticResourceServlet extends HttpServlet {
+        @Override
+        protected void service(HttpServletRequest request, HttpServletResponse response)
+                throws IOException {
+            serveStatic(request.getServletPath(), request.getMethod(), response);
+        }
+    }
 
+    private static final class FilterSelection {
         private final List<Filter> filters;
         private final boolean asyncSupported;
 

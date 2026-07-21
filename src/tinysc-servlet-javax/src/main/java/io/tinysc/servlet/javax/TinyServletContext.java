@@ -1,5 +1,8 @@
 package io.tinysc.servlet.javax;
 
+import io.tinysc.deployment.WebAppClassLoader;
+import io.tinysc.deployment.WebAppResources;
+
 import javax.servlet.Filter;
 import javax.servlet.FilterRegistration;
 import javax.servlet.RequestDispatcher;
@@ -11,13 +14,18 @@ import javax.servlet.SessionCookieConfig;
 import javax.servlet.SessionTrackingMode;
 import javax.servlet.descriptor.JspConfigDescriptor;
 import javax.servlet.http.Cookie;
+import java.io.FilterInputStream;
 import java.io.IOException;
 import java.io.InputStream;
+import java.net.JarURLConnection;
 import java.net.MalformedURLException;
+import java.net.URISyntaxException;
 import java.net.URL;
+import java.net.URLConnection;
 import java.nio.file.FileVisitResult;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.nio.file.Paths;
 import java.nio.file.SimpleFileVisitor;
 import java.nio.file.attribute.BasicFileAttributes;
 import java.util.Collections;
@@ -28,6 +36,8 @@ import java.util.LinkedHashSet;
 import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.jar.JarEntry;
+import java.util.jar.JarFile;
 import java.util.logging.Level;
 import java.util.logging.Logger;
 
@@ -36,7 +46,8 @@ final class TinyServletContext implements ServletContext, AutoCloseable {
 
     private final String contextPath;
     private final Path webRoot;
-    private final ClassLoader classLoader;
+    private final WebAppClassLoader classLoader;
+    private final WebAppResources resources;
     private final JavaxServletRuntime registry;
     private final Map<String, String> initParameters;
     private final Map<String, Object> attributes = new ConcurrentHashMap<String, Object>();
@@ -45,12 +56,14 @@ final class TinyServletContext implements ServletContext, AutoCloseable {
     private final Path tempDirectory;
     private volatile boolean initialized;
 
-    TinyServletContext(String contextPath, Path webRoot, ClassLoader classLoader,
+    TinyServletContext(String contextPath, Path webRoot, WebAppClassLoader classLoader,
+                       WebAppResources resources,
                        Map<String, String> initParameters, JavaxServletRuntime registry)
             throws IOException {
         this.contextPath = contextPath;
         this.webRoot = webRoot.toAbsolutePath().normalize();
         this.classLoader = classLoader;
+        this.resources = resources;
         this.registry = registry;
         this.initParameters = new LinkedHashMap<String, String>(initParameters);
         sessionCookieConfig = new TinySessionCookieConfig();
@@ -128,21 +141,7 @@ final class TinyServletContext implements ServletContext, AutoCloseable {
 
     @Override
     public Set<String> getResourcePaths(String path) {
-        Path directory = resolveResource(path);
-        if (directory == null || !Files.isDirectory(directory)) {
-            return null;
-        }
-        Set<String> result = new LinkedHashSet<String>();
-        try (java.nio.file.DirectoryStream<Path> stream = Files.newDirectoryStream(directory)) {
-            for (Path child : stream) {
-                String suffix = child.getFileName().toString() + (Files.isDirectory(child) ? "/" : "");
-                result.add((path.endsWith("/") ? path : path + "/") + suffix);
-            }
-        } catch (IOException exception) {
-            log("Cannot list resources under " + path, exception);
-            return null;
-        }
-        return Collections.unmodifiableSet(result);
+        return resources.getResourcePaths(path);
     }
 
     @Override
@@ -150,21 +149,58 @@ final class TinyServletContext implements ServletContext, AutoCloseable {
         if (path == null || !path.startsWith("/")) {
             throw new MalformedURLException("resource path must start with /");
         }
-        Path resource = resolveResource(path);
-        return resource != null && Files.exists(resource) ? resource.toUri().toURL() : null;
+        return resources.getResource(path);
     }
 
     @Override
     public InputStream getResourceAsStream(String path) {
-        Path resource = resolveResource(path);
-        if (resource == null || !Files.isRegularFile(resource)) {
-            return null;
-        }
         try {
-            return Files.newInputStream(resource);
+            URL resource = getResource(path);
+            if (resource == null) {
+                return null;
+            }
+            if ("jar".equals(resource.getProtocol())) {
+                return openJarResource(resource);
+            }
+            URLConnection connection = resource.openConnection();
+            connection.setUseCaches(false);
+            return connection.getInputStream();
         } catch (IOException exception) {
             return null;
         }
+    }
+
+    private InputStream openJarResource(URL resource) throws IOException {
+        JarURLConnection location = (JarURLConnection) resource.openConnection();
+        Path archivePath;
+        try {
+            archivePath = Paths.get(location.getJarFileURL().toURI());
+        } catch (URISyntaxException exception) {
+            throw new IOException("invalid resource JAR URL: " + resource, exception);
+        }
+        final JarFile archive = new JarFile(archivePath.toFile());
+        JarEntry entry = archive.getJarEntry(location.getEntryName());
+        if (entry == null || entry.isDirectory()) {
+            archive.close();
+            return null;
+        }
+        final InputStream input;
+        try {
+            input = archive.getInputStream(entry);
+        } catch (IOException failure) {
+            archive.close();
+            throw failure;
+        }
+        return new FilterInputStream(input) {
+            @Override
+            public void close() throws IOException {
+                try {
+                    super.close();
+                } finally {
+                    archive.close();
+                }
+            }
+        };
     }
 
     @Override
@@ -217,7 +253,7 @@ final class TinyServletContext implements ServletContext, AutoCloseable {
     @Override
     public String getRealPath(String path) {
         Path resource = resolveResource(path);
-        return resource == null ? null : resource.toString();
+        return resource != null && Files.exists(resource) ? resource.toString() : null;
     }
 
     @Override

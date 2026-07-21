@@ -40,7 +40,7 @@ Java 17 编译但仍使用 `javax.servlet` 的应用依然选择 1.x。1.x 到 2
 | 项目 | WAR | Context path | 预期基线 |
 |---|---|---|---|
 | Legacy WAR A | 私有原始制品 | `/legacy-app` | L0；外部数据库超时阻塞 L1 |
-| Legacy WAR B | 私有原始制品 | `/legacy-app` | L0；外部数据库超时阻塞 L1 |
+| Legacy WAR B | 私有原始制品 | `/legacy-app` | L1；应用本机 License 阻塞 L2 |
 
-完整证据见 [真实 WAR 验收报告](acceptance/2026-07-21-legacy-war-acceptance.md)。当前没有任何一个
-真实项目达到“启动并可访问”，不能据此声明业务兼容完成。
+完整证据见 [真实 WAR 验收报告](acceptance/2026-07-21-legacy-war-acceptance.md)。Legacy WAR B 已
+启动并可访问其官方注册页，但尚未到达正常登录和业务 API，不能据此声明完整业务兼容。

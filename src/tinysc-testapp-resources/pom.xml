@@ -9,36 +9,21 @@
         <version>1.0.0-alpha-SNAPSHOT</version>
         <relativePath>../../pom.xml</relativePath>
     </parent>
-    <artifactId>tinysc-testapp-javax</artifactId>
-    <packaging>war</packaging>
-    <name>tinysc :: probe javax 3.1 WAR</name>
-
-    <dependencies>
-        <dependency>
-            <groupId>io.tinysc</groupId>
-            <artifactId>tinysc-testapp-resources</artifactId>
-            <version>${project.version}</version>
-        </dependency>
-        <dependency>
-            <groupId>javax.servlet</groupId>
-            <artifactId>javax.servlet-api</artifactId>
-            <scope>provided</scope>
-        </dependency>
-    </dependencies>
+    <artifactId>tinysc-testapp-resources</artifactId>
+    <name>tinysc :: probe resource JAR</name>
 
     <build>
-        <finalName>probe-javax31</finalName>
         <plugins>
             <plugin>
                 <groupId>org.apache.maven.plugins</groupId>
-                <artifactId>maven-war-plugin</artifactId>
-                <version>3.4.0</version>
+                <artifactId>maven-jar-plugin</artifactId>
+                <version>3.4.2</version>
                 <executions>
                     <execution>
-                        <id>build-probe-war-for-integration-tests</id>
+                        <id>default-jar</id>
                         <phase>test</phase>
                         <goals>
-                            <goal>war</goal>
+                            <goal>jar</goal>
                         </goals>
                     </execution>
                 </executions>

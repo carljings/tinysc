@@ -13,7 +13,7 @@ WAR，以较少的层级提供 HTTP 接入、WAR 部署、Servlet 生命周期�
 ### 必须提供
 
 - HTTP/1.1 请求接入及有界资源控制。
-- WAR 与 exploded directory 部署。
+- WAR 与 exploded directory 部署；挂载 `WEB-INF/lib` Resource JAR，并保持 Web 根优先。
 - `web.xml 3.0/3.1`、Servlet、Filter、Listener、SCI。
 - Session、Dispatch、Async 与 Servlet 3.1 非阻塞 I/O。
 - 单进程单 WAR 的启动、优雅停止和健康状态。

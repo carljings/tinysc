@@ -13,10 +13,11 @@ public final class PreparedWebApp implements AutoCloseable {
     private final long prepareMillis;
     private final WebAppDescriptor descriptor;
     private final WebAppClassLoader classLoader;
+    private final WebAppResources resources;
 
     PreparedWebApp(Path source, Path webRoot, String sourceSha256, boolean expansionCacheHit,
                    long prepareMillis, WebAppDescriptor descriptor,
-                   WebAppClassLoader classLoader) {
+                   WebAppClassLoader classLoader, WebAppResources resources) {
         this.source = source;
         this.webRoot = webRoot;
         this.sourceSha256 = sourceSha256;
@@ -24,6 +25,7 @@ public final class PreparedWebApp implements AutoCloseable {
         this.prepareMillis = prepareMillis;
         this.descriptor = descriptor;
         this.classLoader = classLoader;
+        this.resources = resources;
     }
 
     public Path source() {
@@ -52,6 +54,10 @@ public final class PreparedWebApp implements AutoCloseable {
 
     public WebAppClassLoader classLoader() {
         return classLoader;
+    }
+
+    public WebAppResources resources() {
+        return resources;
     }
 
     @Override

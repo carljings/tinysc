@@ -6,7 +6,9 @@ import javax.servlet.http.HttpServletRequest;
 import javax.servlet.http.HttpServletResponse;
 import javax.servlet.http.HttpSession;
 import java.io.IOException;
+import java.io.InputStream;
 import java.io.PrintWriter;
+import java.util.Set;
 
 public final class ProbeServlet extends HttpServlet {
     @Override
@@ -29,5 +31,21 @@ public final class ProbeServlet extends HttpServlet {
         writer.println("name=" + request.getParameter("name"));
         writer.println("session=" + count);
         writer.println("thread=" + Thread.currentThread().getName());
+        writer.println("resourceJar="
+                + (getServletContext().getResource("/jar-resource.html") != null));
+        try (InputStream resource = getServletContext()
+                .getResourceAsStream("/jar-resource.html")) {
+            writer.println("resourceJarStream=" + (resource != null));
+        }
+        Set<String> resourcePaths = getServletContext().getResourcePaths("/");
+        writer.println("resourceJarPaths=" + (resourcePaths != null
+                && resourcePaths.contains("/jar-resource.html")
+                && resourcePaths.contains("/jar-dir/")));
+        writer.println("classesResource="
+                + (getServletContext().getResource("/classes-only.html") != null));
+        writer.println("shadowedJarResource="
+                + (getServletContext().getResource("/jar-shadow/index.html") != null));
+        writer.println("resourceJarRealPath="
+                + (getServletContext().getRealPath("/jar-resource.html") == null));
     }
 }

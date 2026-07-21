@@ -41,36 +41,9 @@
                 <configuration>
                     <systemPropertyVariables>
                         <tinysc.launcher.jar>${maven.multiModuleProjectDirectory}/src/tinysc-launcher/target/tinysc-${project.version}.jar</tinysc.launcher.jar>
+                        <tinysc.probe.war>${maven.multiModuleProjectDirectory}/src/tinysc-testapp-javax/target/probe-javax31.war</tinysc.probe.war>
                     </systemPropertyVariables>
                 </configuration>
-            </plugin>
-            <plugin>
-                <groupId>org.apache.maven.plugins</groupId>
-                <artifactId>maven-dependency-plugin</artifactId>
-                <version>3.8.1</version>
-                <executions>
-                    <execution>
-                        <id>copy-probe-war</id>
-                        <phase>generate-test-resources</phase>
-                        <goals>
-                            <goal>copy</goal>
-                        </goals>
-                        <configuration>
-                            <overWriteReleases>true</overWriteReleases>
-                            <overWriteSnapshots>true</overWriteSnapshots>
-                            <artifactItems>
-                                <artifactItem>
-                                    <groupId>io.tinysc</groupId>
-                                    <artifactId>tinysc-testapp-javax</artifactId>
-                                    <version>${project.version}</version>
-                                    <type>war</type>
-                                    <outputDirectory>${project.build.directory}</outputDirectory>
-                                    <destFileName>probe-javax31.war</destFileName>
-                                </artifactItem>
-                            </artifactItems>
-                        </configuration>
-                    </execution>
-                </executions>
             </plugin>
         </plugins>
     </build>
