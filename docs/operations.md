@@ -28,6 +28,9 @@ exploded WebApp 目录，可用于开发测试跳过 WAR 打包与展开。
 
 ```text
 $TINYSC_BASE/
+├── logs/
+│   ├── tinysc.log
+│   └── tinysc.log.1 ... tinysc.log.5
 └── work/<context>/<war-sha256>/
 
 $JAVA_IO_TMPDIR/
@@ -37,10 +40,31 @@ $JAVA_IO_TMPDIR/
 - 源 WAR 只读，不在原位置展开或修改。
 - `$TINYSC_BASE/work/` 是按 Context 和 WAR SHA-256 隔离的可重建展开缓存。
 - Servlet 临时目录由 `java.io.tmpdir` 提供，正常停止时删除；异常退出后的残留可在确认进程停止后清理。
-- alpha 尚未创建 `conf/`、`logs/` 或独立 `temp/`；配置来自命令行，日志写入标准输出/标准错误，
-  由 systemd、Docker 或调用脚本负责收集。
+- alpha 尚未创建 `conf/` 或独立 `temp/`；配置来自命令行。
 - 日志、配置和运行数据不得写入源 WAR。
 - 生产使用精确版本，不使用 `latest`。
+
+## 日志
+
+TinySC 从启动器初始化阶段开始，将标准输出和标准错误同时写入终端与：
+
+```text
+$TINYSC_BASE/logs/tinysc.log
+```
+
+因此文件中包含 TinySC 启动、就绪、停止日志，以及业务应用写往控制台的日志。主日志追加
+写入，达到 64 MiB 时按大小轮转，保留 `tinysc.log.1` 至 `tinysc.log.5`。轮转不改变终端输出，
+systemd 或 Docker 仍可以按原方式采集 stdout/stderr。
+
+启动时无法创建或打开日志文件会直接终止启动，避免应用在没有持久化启动证据的情况下运行。
+业务 WAR 自行配置的 Log4j/Logback 文件 appender 不受 TinySC 接管；它们的路径、轮转和保留策略仍由
+业务应用负责。当前记录的是进程和应用控制台日志；独立 HTTP 访问日志尚未实现。
+
+持续查看：
+
+```bash
+tail -f "$TINYSC_BASE/logs/tinysc.log"
+```
 
 ## 应用授权与私密运行时覆盖
 

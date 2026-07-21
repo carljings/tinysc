@@ -4,18 +4,27 @@ import io.tinysc.deployment.InspectionReport;
 import io.tinysc.deployment.WarInspector;
 import io.tinysc.kernel.ServerConfig;
 
+import java.io.IOException;
 import java.io.PrintStream;
 import java.nio.file.Path;
 import java.nio.file.Paths;
+import java.time.Instant;
 import java.util.LinkedHashMap;
 import java.util.Map;
+import java.util.concurrent.atomic.AtomicBoolean;
 
 public final class TinyScMain {
     private TinyScMain() {
     }
 
-    public static void main(String[] arguments) throws Exception {
-        int exitCode = run(arguments, System.out, System.err);
+    public static void main(String[] arguments) {
+        int exitCode;
+        try {
+            exitCode = run(arguments, System.out, System.err);
+        } catch (Exception failure) {
+            failure.printStackTrace(System.err);
+            exitCode = 1;
+        }
         if (exitCode != 0) {
             System.exit(exitCode);
         }
@@ -65,25 +74,94 @@ public final class TinyScMain {
                     + options.keySet().iterator().next());
         }
 
+        final LauncherLog log;
+        try {
+            log = LauncherLog.open(config.baseDirectory(), output, error);
+        } catch (IOException failure) {
+            error.println("Unable to initialize file logging under "
+                    + config.baseDirectory() + ": " + failure.getMessage());
+            return 1;
+        }
+        log.install();
+        log.output().println("tinysc log file=" + log.path()
+                + " maxBytes=" + LauncherLog.DEFAULT_MAX_BYTES
+                + " backups=" + LauncherLog.DEFAULT_BACKUPS);
+        log.output().println("tinysc starting"
+                + " at=" + Instant.now()
+                + " war=" + war.toAbsolutePath().normalize()
+                + " base=" + config.baseDirectory()
+                + " context=" + (config.contextPath().isEmpty() ? "/" : config.contextPath()));
+
         final TinyScServer server = new TinyScServer(config, war);
-        int port = server.start();
-        Runtime.getRuntime().addShutdownHook(new Thread(() -> {
+        ServerShutdown shutdown = null;
+        try {
+            int port = server.start();
+            shutdown = new ServerShutdown(server, log, error);
+            Runtime.getRuntime().addShutdownHook(new Thread(shutdown, "tinysc-shutdown"));
+            log.output().println("tinysc ready"
+                    + " bind=" + config.bindAddress()
+                    + " port=" + port
+                    + " context=" + (config.contextPath().isEmpty() ? "/" : config.contextPath())
+                    + " readyMs=" + server.readyMillis()
+                    + " prepareMs=" + server.prepareMillis()
+                    + " expansionCacheHit=" + server.expansionCacheHit()
+                    + " sha256=" + server.sourceSha256());
+            server.await();
+            shutdown.run();
+            return 0;
+        } catch (Exception failure) {
+            if (shutdown == null) {
+                try {
+                    server.close();
+                } catch (Exception closeFailure) {
+                    failure.addSuppressed(closeFailure);
+                }
+                failure.printStackTrace(log.error());
+                try {
+                    log.close();
+                } catch (IOException closeFailure) {
+                    closeFailure.printStackTrace(error);
+                }
+            } else {
+                failure.printStackTrace(log.error());
+                shutdown.run();
+            }
+            return 1;
+        }
+    }
+
+    private static final class ServerShutdown implements Runnable {
+        private final TinyScServer server;
+        private final LauncherLog log;
+        private final PrintStream fallbackError;
+        private final AtomicBoolean stopped = new AtomicBoolean();
+
+        private ServerShutdown(TinyScServer server, LauncherLog log,
+                               PrintStream fallbackError) {
+            this.server = server;
+            this.log = log;
+            this.fallbackError = fallbackError;
+        }
+
+        @Override
+        public void run() {
+            if (!stopped.compareAndSet(false, true)) {
+                return;
+            }
+            log.output().println("tinysc shutdown requested at=" + Instant.now());
             try {
                 server.close();
             } catch (Exception failure) {
-                failure.printStackTrace(System.err);
+                failure.printStackTrace(log.error());
+            } finally {
+                log.output().println("tinysc stopped at=" + Instant.now());
+                try {
+                    log.close();
+                } catch (IOException failure) {
+                    failure.printStackTrace(fallbackError);
+                }
             }
-        }, "tinysc-shutdown"));
-        output.println("tinysc ready"
-                + " bind=" + config.bindAddress()
-                + " port=" + port
-                + " context=" + (config.contextPath().isEmpty() ? "/" : config.contextPath())
-                + " readyMs=" + server.readyMillis()
-                + " prepareMs=" + server.prepareMillis()
-                + " expansionCacheHit=" + server.expansionCacheHit()
-                + " sha256=" + server.sourceSha256());
-        server.await();
-        return 0;
+        }
     }
 
     private static void inspect(Path war, PrintStream output) throws Exception {

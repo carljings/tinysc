@@ -16,6 +16,8 @@ Known limitations；提交历史不能替代发布说明。
 - shaded launcher 的 Java 8 class-major 与 1.x namespace 自动发布门禁。
 - Servlet 3.1 Resource JAR 挂载：支持 `WEB-INF/lib/*.jar!/META-INF/resources` 的静态访问、
   ServletContext 资源 API、欢迎页和 Web 根目录优先级。
+- 启动期即生效的终端/文件双写日志：默认保存到 `--base/logs/tinysc.log`，按 64 MiB
+  轮转并保留 5 份备份。
 
 ### Fixed
 
