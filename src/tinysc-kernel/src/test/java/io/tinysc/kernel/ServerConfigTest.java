@@ -64,4 +64,42 @@ class ServerConfigTest {
         assertThrows(IllegalArgumentException.class,
                 () -> ServerConfig.builder().workerIdleTimeoutMillis(0L).build());
     }
+
+    @Test
+    void defaultsAndKeepsAdmissionLimits() {
+        ServerConfig defaults = ServerConfig.builder().build();
+        assertEquals(1024, defaults.maxConnections());
+        assertEquals((long) defaults.workerThreads() + defaults.workerQueueCapacity(),
+                defaults.maxInflightRequests());
+        assertEquals(64L * 1024L * 1024L, defaults.maxInflightRequestBytes());
+        assertEquals(30000L, defaults.requestReadTimeoutMillis());
+
+        ServerConfig explicit = ServerConfig.builder()
+                .workerThreads(3)
+                .workerQueueCapacity(5)
+                .maxConnections(7)
+                .maxRequestBodySize(1024)
+                .maxInflightRequestBytes(4096L)
+                .requestReadTimeoutMillis(1500L)
+                .build();
+        assertEquals(7, explicit.maxConnections());
+        assertEquals(8L, explicit.maxInflightRequests());
+        assertEquals(4096L, explicit.maxInflightRequestBytes());
+        assertEquals(1500L, explicit.requestReadTimeoutMillis());
+    }
+
+    @Test
+    void rejectsInvalidAdmissionLimits() {
+        assertThrows(IllegalArgumentException.class,
+                () -> ServerConfig.builder().maxConnections(0).build());
+        assertThrows(IllegalArgumentException.class,
+                () -> ServerConfig.builder().maxInflightRequestBytes(0L).build());
+        assertThrows(IllegalArgumentException.class,
+                () -> ServerConfig.builder().requestReadTimeoutMillis(0L).build());
+        assertThrows(IllegalArgumentException.class,
+                () -> ServerConfig.builder()
+                        .maxRequestBodySize(1024)
+                        .maxInflightRequestBytes(512L)
+                        .build());
+    }
 }

@@ -40,7 +40,7 @@ public final class ContainerRequest {
         remoteAddress = Objects.requireNonNull(builder.remoteAddress, "remoteAddress");
         localAddress = Objects.requireNonNull(builder.localAddress, "localAddress");
         headers = immutableHeaders(builder.headers);
-        body = builder.body == null ? new byte[0] : builder.body.clone();
+        body = builder.body == null ? new byte[0] : builder.body;
     }
 
     public String method() {

@@ -67,6 +67,11 @@ public final class TinyScMain {
                 .baseDirectory(Paths.get(option(options, "base", ".")))
                 .ioThreads(integerOption(options, "io-threads", Math.max(1, Math.min(2,
                         Runtime.getRuntime().availableProcessors()))))
+                .maxConnections(positiveIntegerOption(options, "max-connections", 1024))
+                .maxInflightRequestBytes(positiveLongOption(
+                        options, "max-inflight-request-bytes", 64L * 1024L * 1024L))
+                .requestReadTimeoutMillis(positiveLongOption(
+                        options, "request-read-timeout", 30000L))
                 .workerThreads(workerThreads)
                 .workerQueueCapacity(integerOption(options, "worker-queue", 100))
                 .workerIdleTimeoutMillis(idleTimeoutMillisOption(options, "worker-idle-timeout",
@@ -98,6 +103,10 @@ public final class TinyScMain {
                 + " war=" + war.toAbsolutePath().normalize()
                 + " base=" + config.baseDirectory()
                 + " context=" + (config.contextPath().isEmpty() ? "/" : config.contextPath())
+                + " maxConnections=" + config.maxConnections()
+                + " maxInflightRequests=" + config.maxInflightRequests()
+                + " maxInflightRequestBytes=" + config.maxInflightRequestBytes()
+                + " requestReadTimeoutMs=" + config.requestReadTimeoutMillis()
                 + " workerMin=" + config.workerMinThreads()
                 + " workerMax=" + config.workerThreads()
                 + " workerQueue=" + config.workerQueueCapacity()
@@ -232,6 +241,25 @@ public final class TinyScMain {
         return parsed;
     }
 
+    private static int positiveIntegerOption(Map<String, String> options, String name,
+                                             int defaultValue) {
+        String value = options.remove(name);
+        return value == null ? defaultValue : positiveIntegerOption(name, value);
+    }
+
+    private static long positiveLongOption(Map<String, String> options, String name,
+                                           long defaultValue) {
+        String value = options.remove(name);
+        if (value == null) {
+            return defaultValue;
+        }
+        long parsed = Long.parseLong(value);
+        if (parsed <= 0L) {
+            throw new IllegalArgumentException("Option --" + name + " must be positive");
+        }
+        return parsed;
+    }
+
     private static long idleTimeoutMillisOption(Map<String, String> options, String name,
                                                 long defaultValue) {
         String value = options.remove(name);
@@ -256,5 +284,8 @@ public final class TinyScMain {
         output.println("               [--context-path /app] [--base .]");
         output.println("               [--io-threads N] [--workers N] [--min-workers N]");
         output.println("               [--worker-queue N] [--worker-idle-timeout SECONDS]");
+        output.println("               [--max-connections N]");
+        output.println("               [--max-inflight-request-bytes BYTES]");
+        output.println("               [--request-read-timeout MILLISECONDS]");
     }
 }

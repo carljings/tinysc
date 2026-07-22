@@ -24,6 +24,7 @@ import io.netty.handler.codec.http.HttpObjectAggregator;
 import io.netty.handler.codec.http.HttpResponseStatus;
 import io.netty.handler.codec.http.HttpServerCodec;
 import io.netty.handler.codec.http.HttpUtil;
+import io.netty.handler.flow.FlowControlHandler;
 import io.netty.handler.timeout.ReadTimeoutHandler;
 import io.netty.util.CharsetUtil;
 import io.tinysc.kernel.ContainerExchange;
@@ -52,10 +53,12 @@ public final class NettyHttpConnector implements AutoCloseable {
     private final ServerConfig config;
     private final WebAppRuntime runtime;
     private final AtomicBoolean started = new AtomicBoolean();
+    private final AtomicBoolean accepting = new AtomicBoolean();
     private final AtomicLong rejectedRequests = new AtomicLong();
     private EventLoopGroup acceptorGroup;
     private EventLoopGroup ioGroup;
     private BoundedElasticExecutor applicationExecutor;
+    private RequestAdmissionController admissionController;
     private Channel serverChannel;
 
     public NettyHttpConnector(ServerConfig config, WebAppRuntime runtime) {
@@ -76,6 +79,10 @@ public final class NettyHttpConnector implements AutoCloseable {
                 config.ioThreads(),
                 new NamedThreadFactory("tinysc-io-", false), NioIoHandler.newFactory());
         rejectedRequests.set(0L);
+        admissionController = new RequestAdmissionController(
+                config.maxConnections(), config.maxInflightRequests(),
+                config.maxInflightRequestBytes());
+        accepting.set(true);
         applicationExecutor = new BoundedElasticExecutor(
                 config.workerMinThreads(), config.workerThreads(),
                 config.workerIdleTimeoutMillis(), config.workerQueueCapacity(),
@@ -97,10 +104,12 @@ public final class NettyHttpConnector implements AutoCloseable {
                     .childHandler(new ChannelInitializer<SocketChannel>() {
                         @Override
                         protected void initChannel(SocketChannel channel) {
-                            channel.pipeline().addLast("read-timeout", new ReadTimeoutHandler(30));
+                            channel.pipeline().addLast("read-timeout", new ReadTimeoutHandler(
+                                    config.requestReadTimeoutMillis(), TimeUnit.MILLISECONDS));
                             channel.pipeline().addLast("http-codec", new HttpServerCodec(decoderConfig));
                             channel.pipeline().addLast("http-aggregate",
                                     new HttpObjectAggregator(config.maxRequestBodySize(), true));
+                            channel.pipeline().addLast("flow-control", new FlowControlHandler());
                             channel.pipeline().addLast("request", new RequestHandler());
                         }
                     });
@@ -152,26 +161,60 @@ public final class NettyHttpConnector implements AutoCloseable {
         return rejectedRequests.get();
     }
 
+    long activeConnectionCount() {
+        RequestAdmissionController controller = admissionController;
+        return controller == null ? 0L : controller.activeConnections();
+    }
+
+    long inflightRequestCount() {
+        RequestAdmissionController controller = admissionController;
+        return controller == null ? 0L : controller.activeRequests();
+    }
+
+    long inflightRequestBytes() {
+        RequestAdmissionController controller = admissionController;
+        return controller == null ? 0L : controller.activeRequestBytes();
+    }
+
+    long rejectedConnectionCount() {
+        RequestAdmissionController controller = admissionController;
+        return controller == null ? 0L : controller.rejectedConnections();
+    }
+
+    long rejectedInflightRequestCount() {
+        RequestAdmissionController controller = admissionController;
+        return controller == null ? 0L : controller.rejectedRequests();
+    }
+
+    long rejectedInflightRequestByteCount() {
+        RequestAdmissionController controller = admissionController;
+        return controller == null ? 0L : controller.rejectedRequestBytes();
+    }
+
     @Override
     public synchronized void close() {
         if (!started.getAndSet(false)) {
             return;
         }
+        accepting.set(false);
         long graceMillis = config.shutdownGraceMillis();
         if (serverChannel != null) {
             serverChannel.close().awaitUninterruptibly(graceMillis);
             serverChannel = null;
         }
+        awaitInflightRequests(graceMillis);
         shutdownExecutor(applicationExecutor, graceMillis);
         applicationExecutor = null;
         shutdownEventLoop(ioGroup, graceMillis);
         ioGroup = null;
         shutdownEventLoop(acceptorGroup, graceMillis);
         acceptorGroup = null;
+        admissionController = null;
     }
 
     private void stopAfterFailedStart() {
         started.set(false);
+        accepting.set(false);
         if (serverChannel != null) {
             serverChannel.close().awaitUninterruptibly();
             serverChannel = null;
@@ -182,6 +225,23 @@ public final class NettyHttpConnector implements AutoCloseable {
         ioGroup = null;
         shutdownEventLoop(acceptorGroup, 0L);
         acceptorGroup = null;
+        admissionController = null;
+    }
+
+    private void awaitInflightRequests(long graceMillis) {
+        RequestAdmissionController controller = admissionController;
+        if (controller == null) {
+            return;
+        }
+        try {
+            if (!controller.awaitNoRequests(graceMillis)) {
+                LOGGER.warning("Shutdown grace expired with inflight requests"
+                        + " requests=" + controller.activeRequests()
+                        + " requestBytes=" + controller.activeRequestBytes());
+            }
+        } catch (InterruptedException interrupted) {
+            Thread.currentThread().interrupt();
+        }
     }
 
     private static void shutdownExecutor(ThreadPoolExecutor executor, long graceMillis) {
@@ -208,20 +268,71 @@ public final class NettyHttpConnector implements AutoCloseable {
 
     private final class RequestHandler extends SimpleChannelInboundHandler<FullHttpRequest> {
         private final StrictRequestValidator validator = new StrictRequestValidator();
+        private RequestAdmissionController.ConnectionLease connectionLease;
+
+        @Override
+        public void channelActive(ChannelHandlerContext context) throws Exception {
+            RequestAdmissionController controller = admissionController;
+            if (!accepting.get() || controller == null) {
+                context.close();
+                return;
+            }
+            connectionLease = controller.tryAcquireConnection();
+            if (connectionLease == null) {
+                recordRejectedConnection();
+                context.close();
+                return;
+            }
+            super.channelActive(context);
+        }
+
+        @Override
+        public void channelInactive(ChannelHandlerContext context) throws Exception {
+            if (connectionLease != null) {
+                connectionLease.close();
+                connectionLease = null;
+            }
+            super.channelInactive(context);
+        }
 
         @Override
         protected void channelRead0(ChannelHandlerContext context, FullHttpRequest request) {
             final boolean keepAlive = HttpUtil.isKeepAlive(request);
+            pauseReads(context);
             try {
+                if (!accepting.get()) {
+                    writeText(context, request.protocolVersion(),
+                            HttpResponseStatus.SERVICE_UNAVAILABLE,
+                            "tinysc is stopping\n", false);
+                    return;
+                }
                 validator.validate(request);
-                final ContainerRequest containerRequest = toContainerRequest(context, request);
-                context.channel().config().setAutoRead(false);
+                RequestAdmissionController controller = admissionController;
+                final RequestAdmissionController.RequestLease requestLease = controller == null
+                        ? null : controller.tryAcquireRequest(request.content().readableBytes());
+                if (requestLease == null) {
+                    recordRejectedAdmission();
+                    writeText(context, request.protocolVersion(),
+                            HttpResponseStatus.SERVICE_UNAVAILABLE,
+                            "tinysc request capacity is full\n", false);
+                    return;
+                }
+                final ContainerRequest containerRequest;
+                try {
+                    containerRequest = toContainerRequest(context, request);
+                } catch (RuntimeException conversionFailure) {
+                    requestLease.close();
+                    throw conversionFailure;
+                }
+                final io.netty.handler.codec.http.HttpVersion protocolVersion =
+                        request.protocolVersion();
                 try {
                     applicationExecutor.execute(() -> service(
-                            context, request.protocolVersion(), containerRequest, keepAlive));
+                            context, protocolVersion, containerRequest, keepAlive, requestLease));
                 } catch (RejectedExecutionException rejected) {
+                    requestLease.close();
                     recordRejectedRequest();
-                    writeText(context, request.protocolVersion(), HttpResponseStatus.SERVICE_UNAVAILABLE,
+                    writeText(context, protocolVersion, HttpResponseStatus.SERVICE_UNAVAILABLE,
                             "tinysc worker queue is full\n", false);
                 }
             } catch (RequestValidationException exception) {
@@ -242,6 +353,25 @@ public final class NettyHttpConnector implements AutoCloseable {
         }
     }
 
+    private static void pauseReads(ChannelHandlerContext context) {
+        context.channel().config().setAutoRead(false);
+        if (context.pipeline().context("read-timeout") != null) {
+            context.pipeline().remove("read-timeout");
+        }
+    }
+
+    private void resumeReads(ChannelHandlerContext context) {
+        if (!context.channel().isActive()) {
+            return;
+        }
+        if (context.pipeline().context("read-timeout") == null) {
+            context.pipeline().addFirst("read-timeout", new ReadTimeoutHandler(
+                    config.requestReadTimeoutMillis(), TimeUnit.MILLISECONDS));
+        }
+        context.channel().config().setAutoRead(true);
+        context.read();
+    }
+
     private void recordRejectedRequest() {
         long rejected = rejectedRequests.incrementAndGet();
         if ((rejected & (rejected - 1L)) == 0L) {
@@ -253,9 +383,33 @@ public final class NettyHttpConnector implements AutoCloseable {
         }
     }
 
+    private void recordRejectedConnection() {
+        long rejected = rejectedConnectionCount();
+        if ((rejected & (rejected - 1L)) == 0L) {
+            LOGGER.warning("Connection limit reached"
+                    + " rejected=" + rejected
+                    + " active=" + activeConnectionCount()
+                    + " limit=" + config.maxConnections());
+        }
+    }
+
+    private void recordRejectedAdmission() {
+        long requestRejected = rejectedInflightRequestCount();
+        long byteRejected = rejectedInflightRequestByteCount();
+        long rejected = requestRejected + byteRejected;
+        if ((rejected & (rejected - 1L)) == 0L) {
+            LOGGER.warning("Request admission limit reached"
+                    + " rejectedRequests=" + requestRejected
+                    + " rejectedBytes=" + byteRejected
+                    + " activeRequests=" + inflightRequestCount()
+                    + " activeRequestBytes=" + inflightRequestBytes());
+        }
+    }
+
     private void service(ChannelHandlerContext context,
                          io.netty.handler.codec.http.HttpVersion protocolVersion,
-                         ContainerRequest request, boolean keepAlive) {
+                         ContainerRequest request, boolean keepAlive,
+                         RequestAdmissionController.RequestLease requestLease) {
         ContainerExchange exchange = new ContainerExchange(
                 request, new ContainerResponse(), applicationExecutor);
         try {
@@ -281,12 +435,38 @@ public final class NettyHttpConnector implements AutoCloseable {
                 logApplicationFailure(request, failure);
                 renderFailure(exchange.response());
             }
-            context.executor().execute(() -> {
-                writeResponse(context, protocolVersion, request.method(),
-                        exchange.response(), keepAlive);
-                context.channel().config().setAutoRead(true);
-                context.read();
-            });
+            try {
+                context.executor().execute(() -> finishRequest(
+                        context, protocolVersion, request, exchange.response(),
+                        keepAlive, requestLease));
+            } catch (RejectedExecutionException rejected) {
+                requestLease.close();
+                context.close();
+            }
+        });
+    }
+
+    private void finishRequest(ChannelHandlerContext context,
+                               io.netty.handler.codec.http.HttpVersion protocolVersion,
+                               ContainerRequest request, ContainerResponse response,
+                               boolean keepAlive,
+                               RequestAdmissionController.RequestLease requestLease) {
+        final ChannelFuture writeFuture;
+        try {
+            writeFuture = writeResponse(
+                    context, protocolVersion, request.method(), response, keepAlive);
+        } catch (RuntimeException writeFailure) {
+            requestLease.close();
+            context.close();
+            throw writeFailure;
+        }
+        writeFuture.addListener(completed -> {
+            requestLease.close();
+            if (!completed.isSuccess() || !keepAlive || !accepting.get()) {
+                context.close();
+                return;
+            }
+            resumeReads(context);
         });
     }
 
@@ -371,10 +551,10 @@ public final class NettyHttpConnector implements AutoCloseable {
         }
     }
 
-    private static void writeResponse(ChannelHandlerContext context,
-                                      io.netty.handler.codec.http.HttpVersion protocolVersion,
-                                      String requestMethod, ContainerResponse source,
-                                      boolean keepAlive) {
+    private static ChannelFuture writeResponse(ChannelHandlerContext context,
+                                               io.netty.handler.codec.http.HttpVersion protocolVersion,
+                                               String requestMethod, ContainerResponse source,
+                                               boolean keepAlive) {
         byte[] body = source.bodyBytes();
         byte[] transmittedBody = "HEAD".equals(requestMethod) ? new byte[0] : body;
         HttpResponseStatus status = HttpResponseStatus.valueOf(source.status());
@@ -394,10 +574,7 @@ public final class NettyHttpConnector implements AutoCloseable {
             response.headers().set(HttpHeaderNames.CONNECTION, HttpHeaderValues.CLOSE);
         }
         source.commit();
-        ChannelFuture future = context.writeAndFlush(response);
-        if (!keepAlive) {
-            future.addListener(io.netty.channel.ChannelFutureListener.CLOSE);
-        }
+        return context.writeAndFlush(response);
     }
 
     private static void writeText(ChannelHandlerContext context,

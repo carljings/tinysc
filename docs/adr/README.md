@@ -11,5 +11,6 @@
 | [0007](0007-standard-servlet-integration.md) | Accepted | 框架只经标准 Servlet 接入 |
 | [0008](0008-evidence-based-performance-positioning.md) | Accepted | 用可复现基准兑现性能亮点 |
 | [0009](0009-bounded-elastic-worker-pool.md) | Accepted | 有界弹性工作线程池 |
+| [0010](0010-bounded-request-admission.md) | Accepted | 有界请求准入 |
 
 编号一旦发布不得复用。决策被替代时保留原文件并标记 Superseded。

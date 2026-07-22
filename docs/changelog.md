@@ -8,7 +8,7 @@ Known limitations；提交历史不能替代发布说明。
 ### Added
 
 - Java 8 / Servlet 3.1 / `javax.servlet` 的 1.x Maven 多模块基线。
-- Netty HTTP/1.1 connector、有界 worker、严格请求校验和事务式端口开放。
+- Netty HTTP/1.1 connector、有界 worker、严格请求校验、事务式端口开放，以及连接/请求/字节三层准入。
 - WAR 检查、安全展开、SHA-256 缓存、`web.xml` 解析和 WebApp 类加载器。
 - Servlet、Filter、Listener、SCI、Session、基础 Async 与 RequestDispatcher 链路。
 - `tinysc inspect` namespace/bytecode 建议与 `tinysc start` 启动命令。
@@ -24,7 +24,10 @@ Known limitations；提交历史不能替代发布说明。
 - 未显式指定 `--base` 时使用当前工作目录，使本地开发日志与缓存分别进入工程
   `logs/` 和 `work/`。
 - worker 从固定线程池改为有界弹性池：`--workers` 作为上限，新增 `--min-workers` 与
-  `--worker-idle-timeout`，默认队列容量由 1024 收紧为 100；线程与队列同时饱和时仍返回 503。
+  `--worker-idle-timeout`，默认队列容量由 1024 收紧为 100；同时新增 `--max-connections`
+  默认 `1024`、`--max-inflight-request-bytes` 默认 `64 MiB` 和 `--request-read-timeout`
+  默认 `30000`，`maxInflightRequests` 由 `workerThreads + workerQueueCapacity` 推导。连接超限
+  直接关闭，请求数或字节超限返回 `503` 并关闭连接。
 
 ### Fixed
 
@@ -32,6 +35,7 @@ Known limitations；提交历史不能替代发布说明。
 - 真实 Legacy WAR 的无后缀资源路由可 forward 到 Resource JAR 内 HTML，不再落入容器 404。
 - JAR 静态资源的 GET/HEAD 和 ServletContext stream 在关闭后同步释放 JarFile，避免请求累计耗尽
   文件描述符。
+- 同一 HTTP/1.1 keep-alive channel 在前一个响应 flush 完成后再继续读取后续请求。
 
 ### Known limitations
 
@@ -40,3 +44,5 @@ Known limitations；提交历史不能替代发布说明。
 - Legacy WAR A 仍被外部数据库连接超时阻断；Legacy WAR B 的登录和 API 验收受本机 License
   门禁阻塞。
 - 预备基准尚不支持“内存低 30%”或“尾延迟优于 Tomcat”的发布声明。
+- `maxInflightRequestBytes` 只约束已经聚合且通过准入、正在处理的请求体字节，不保护 streaming/raw ingress。
+- 现有 smoke 和 benchmark 结果只用于状态验证或预备对照，不构成正式性能声明。

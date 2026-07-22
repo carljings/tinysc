@@ -48,10 +48,14 @@ JAVA_HOME=$(/usr/libexec/java_home -v 1.8) \
 当前 Probe WAR 端到端测试在随机端口验证：Filter → Servlet、参数与映射、Listener、Session
 续用、SCI 动态注册、异步完成、RequestDispatcher forward、静态 GET/HEAD、Resource JAR 的
 直接/forward/HEAD/欢迎页和 ServletContext 资源 API、Web 根优先级、`WEB-INF` 保护以及 context
-外 404。HTTP 模块另测工作线程交接及 Content-Length/Transfer-Encoding 歧义拒绝；
+外 404。HTTP 模块另测工作线程交接、Content-Length/Transfer-Encoding 歧义拒绝、连接上限关闭、
+在途请求/字节准入、同一 HTTP/1.1 channel 的串行化，以及 deferred exchange 的停机等待；
 部署模块测试安全展开、XML 解析和应用线程清理。启动器另验证终端/文件双写、追加、
-大小轮转、标准流恢复，以及真实 shaded JAR 启动和进程优雅终止日志。
+大小轮转、标准流恢复、`--max-connections`、`--max-inflight-request-bytes`、`--request-read-timeout`
+参数解析，以及真实 shaded JAR 启动和进程优雅终止日志。
 
 尚未覆盖的关键项包括 multipart、异步 dispatch、Servlet 非阻塞 ReadListener/WriteListener、
 error-page、安全约束、web-fragment、注解声明、URL 重写 Session、上传限额和 TCK。它们完成前
 不得宣称完整 Servlet 3.1 兼容。
+
+现有 smoke 和 benchmark 结果只用于状态验证或预备对照；未达门槛前，不得把它们写成正式性能声明。

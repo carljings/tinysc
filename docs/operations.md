@@ -14,7 +14,10 @@ java -jar tinysc-1.0.0-alpha-SNAPSHOT.jar start \
   --workers 32 \
   --min-workers 8 \
   --worker-idle-timeout 60 \
-  --worker-queue 100
+  --worker-queue 100 \
+  --max-connections 1024 \
+  --max-inflight-request-bytes 67108864 \
+  --request-read-timeout 30000
 ```
 
 检查 WAR：
@@ -27,6 +30,14 @@ java -jar tinysc-1.0.0-alpha-SNAPSHOT.jar inspect /path/to/app.war
 exploded WebApp 目录，可用于开发测试跳过 WAR 打包与展开。
 未指定 `--base` 时，当前工作目录就是实例根目录，日志默认写入工程的 `logs/tinysc.log`。
 生产环境应显式传入每个实例独立的 `--base`。
+
+## 准入与超时
+
+- `--max-connections` 限制同时保持的 TCP 连接数；超过上限的新连接会直接关闭。
+- `maxInflightRequests` 由 `--workers + --worker-queue` 推导；达到上限后，新请求会返回 `503`，随后关闭连接。
+- `--max-inflight-request-bytes` 限制已经聚合且通过准入、正在处理的请求体字节；超限时同样返回 `503` 并关闭连接。
+- `--request-read-timeout` 只覆盖读取/解析和 keep-alive 空闲阶段，Servlet/Async 执行不会被它中断。
+- 同一 HTTP/1.1 channel 上的后续请求会等前一个响应 flush 完成后再继续读取。
 
 ## 运行目录
 
@@ -82,9 +93,9 @@ tinysc 不生成、替换或绕过业务应用自己的 License。需要机器�
 
 ## 停止
 
-收到 SIGTERM 后先关闭 connector，等待在途同步/异步请求，再逆序销毁 Servlet、Filter 和已成功
-初始化的 Listener。应用自建线程先获得排空时间；Log4j2 使用对应 LoggerContext 优雅关闭，仍未
-停止的线程会被中断并解除 WebApp TCCL 引用。
+收到 SIGTERM 后先关闭 connector，等待在途同步/异步请求和已经接纳但仍处于 deferred 状态的
+exchange，再逆序销毁 Servlet、Filter 和已成功初始化的 Listener。应用自建线程先获得排空时间；
+Log4j2 使用对应 LoggerContext 优雅关闭，仍未停止的线程会被中断并解除 WebApp TCCL 引用。
 
 当前尚未提供可查询的 readiness URL；“ready”以启动日志和 connector 绑定为准。这是 alpha
 限制，不能写成已有生产健康检查。

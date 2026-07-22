@@ -17,6 +17,9 @@ tinysc 1.x alpha 只接受命令行配置。未知参数、重复参数、缺少
 | `--min-workers` | 否 | `min(8, --workers)` | 核心保留线；已创建的 worker 回落到该值后不再因空闲被回收 |
 | `--worker-idle-timeout` | 否 | `60` | worker 空闲回收超时时间，单位秒 |
 | `--worker-queue` | 否 | `100` | 有界工作队列容量；现有 worker 都繁忙且未触顶时优先扩容，饱和时新请求返回 503 |
+| `--max-connections` | 否 | `1024` | 同时保持的 TCP 连接上限；超限的新连接直接关闭 |
+| `--max-inflight-request-bytes` | 否 | `64 MiB` | 已聚合且通过准入、正在处理的请求体字节上限；不是流式 ingress 保护 |
+| `--request-read-timeout` | 否 | `30000` | 读取/解析和 keep-alive 空闲超时，单位毫秒；只在读取阶段生效，Servlet/Async 执行不受影响 |
 
 示例：
 
@@ -31,7 +34,10 @@ java -jar tinysc-1.0.0-alpha-SNAPSHOT.jar start \
   --workers 32 \
   --min-workers 8 \
   --worker-idle-timeout 60 \
-  --worker-queue 100
+  --worker-queue 100 \
+  --max-connections 1024 \
+  --max-inflight-request-bytes 67108864 \
+  --request-read-timeout 30000
 ```
 
 worker 调度规则如下：
@@ -40,23 +46,27 @@ worker 调度规则如下：
 - 现有 worker 都繁忙且尚未触顶时，池会先扩容；有空闲 worker 时，请求可短暂入队并立即被消费。
 - Netty I/O 线程不做 `CallerRuns` 兜底，避免接入线程被业务阻塞。
 - 线程和队列都饱和时，对外返回 `503`。
+- `maxInflightRequests` 是派生值，等于 `--workers + --worker-queue`，不是独立 CLI 参数。
+- `--max-inflight-request-bytes` 限制的是已经聚合且通过准入、正在处理的请求体字节，不是 raw ingress 流控。
+- `--request-read-timeout` 只覆盖读取/解析和 keep-alive 空闲阶段，不会中断 Servlet/Async 执行。
 
 ## alpha 固定限制
 
-这些限制已在内核中生效，但尚未暴露为 CLI 参数：
+这些限制已在内核中生效，仍保持固定或暂未暴露为独立 CLI 参数：
 
 | 限制 | 当前值 |
 |---|---:|
 | HTTP 请求行 | 8 KiB |
 | HTTP Header | 16 KiB |
 | 聚合请求体 | 16 MiB |
-| Socket 读超时 | 30 秒 |
 | Listen backlog | 256 |
 | 优雅停止等待 | 30 秒 |
 
-请求体当前在进入 Servlet 前完整聚合，因此 16 MiB 不是上传能力承诺。multipart、流式上传和
-Servlet 非阻塞 I/O 尚未完成；大文件场景不能以调大上限代替流式实现。worker 池的弹性调度只解决
-并发处理，不解决请求字节级准入或流式分段。
+请求体当前在进入 Servlet 前完整聚合，因此 16 MiB 不是上传能力承诺。`maxInflightRequestBytes`
+只约束已经聚合且通过准入、正在处理的请求数据，不是 streaming/raw ingress 保护；`FlowControlHandler`
+只会让同一 HTTP/1.1 channel 在前一个响应 flush 后再继续读取。`--request-read-timeout` 只覆盖
+读取/解析和 keep-alive 空闲阶段，不会中断 Servlet/Async 执行。multipart、流式上传和 Servlet 非阻塞
+I/O 尚未完成；大文件场景不能以调大上限代替流式实现。
 
 ## 生产建议
 

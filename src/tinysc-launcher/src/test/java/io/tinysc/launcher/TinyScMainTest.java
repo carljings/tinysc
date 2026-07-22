@@ -73,6 +73,10 @@ class TinyScMainTest {
         assertTrue(logOutput.contains("workerMax="), logOutput);
         assertTrue(logOutput.contains("workerQueue=100"), logOutput);
         assertTrue(logOutput.contains("workerIdleMs=60000"), logOutput);
+        assertTrue(logOutput.contains("maxConnections=1024"), logOutput);
+        assertTrue(logOutput.contains("maxInflightRequests="), logOutput);
+        assertTrue(logOutput.contains("maxInflightRequestBytes=67108864"), logOutput);
+        assertTrue(logOutput.contains("requestReadTimeoutMs=30000"), logOutput);
         assertTrue(terminalOutput.toString("UTF-8").contains("tinysc starting"));
         assertTrue(terminalError.size() > 0);
     }
@@ -90,7 +94,10 @@ class TinyScMainTest {
                 "--workers", "9",
                 "--min-workers", "3",
                 "--worker-queue", "7",
-                "--worker-idle-timeout", "45"
+                "--worker-idle-timeout", "45",
+                "--max-connections", "11",
+                "--max-inflight-request-bytes", "4294967296",
+                "--request-read-timeout", "12345"
         }, new PrintStream(terminalOutput, true, "UTF-8"),
                 new PrintStream(terminalError, true, "UTF-8"));
 
@@ -101,6 +108,10 @@ class TinyScMainTest {
         assertTrue(logOutput.contains("workerMax=9"), logOutput);
         assertTrue(logOutput.contains("workerQueue=7"), logOutput);
         assertTrue(logOutput.contains("workerIdleMs=45000"), logOutput);
+        assertTrue(logOutput.contains("maxConnections=11"), logOutput);
+        assertTrue(logOutput.contains("maxInflightRequests=16"), logOutput);
+        assertTrue(logOutput.contains("maxInflightRequestBytes=4294967296"), logOutput);
+        assertTrue(logOutput.contains("requestReadTimeoutMs=12345"), logOutput);
     }
 
     @Test
@@ -136,5 +147,35 @@ class TinyScMainTest {
         assertEquals(2, overflowExitCode);
         assertTrue(new String(overflowErrorBytes.toByteArray(), StandardCharsets.UTF_8)
                 .contains("Option --worker-idle-timeout is too large"));
+    }
+
+    @Test
+    void rejectsInvalidAdmissionOptionValues() throws Exception {
+        ByteArrayOutputStream connectionError = new ByteArrayOutputStream();
+        int connectionExit = TinyScMain.run(new String[]{
+                "start", "--war", "missing.war", "--max-connections", "0"
+        }, new PrintStream(new ByteArrayOutputStream()),
+                new PrintStream(connectionError, true, "UTF-8"));
+        assertEquals(2, connectionExit);
+        assertTrue(new String(connectionError.toByteArray(), StandardCharsets.UTF_8)
+                .contains("Option --max-connections must be positive"));
+
+        ByteArrayOutputStream bytesError = new ByteArrayOutputStream();
+        int bytesExit = TinyScMain.run(new String[]{
+                "start", "--war", "missing.war", "--max-inflight-request-bytes", "0"
+        }, new PrintStream(new ByteArrayOutputStream()),
+                new PrintStream(bytesError, true, "UTF-8"));
+        assertEquals(2, bytesExit);
+        assertTrue(new String(bytesError.toByteArray(), StandardCharsets.UTF_8)
+                .contains("Option --max-inflight-request-bytes must be positive"));
+
+        ByteArrayOutputStream timeoutError = new ByteArrayOutputStream();
+        int timeoutExit = TinyScMain.run(new String[]{
+                "start", "--war", "missing.war", "--request-read-timeout", "0"
+        }, new PrintStream(new ByteArrayOutputStream()),
+                new PrintStream(timeoutError, true, "UTF-8"));
+        assertEquals(2, timeoutExit);
+        assertTrue(new String(timeoutError.toByteArray(), StandardCharsets.UTF_8)
+                .contains("Option --request-read-timeout must be positive"));
     }
 }

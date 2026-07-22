@@ -11,6 +11,10 @@ public final class ServerConfig {
     private final int maxInitialLineLength;
     private final int maxHeaderSize;
     private final int maxRequestBodySize;
+    private final int maxConnections;
+    private final long maxInflightRequests;
+    private final long maxInflightRequestBytes;
+    private final long requestReadTimeoutMillis;
     private final int ioThreads;
     private final int workerThreads;
     private final int workerMinThreads;
@@ -29,6 +33,15 @@ public final class ServerConfig {
         maxInitialLineLength = requirePositive(builder.maxInitialLineLength, "maxInitialLineLength");
         maxHeaderSize = requirePositive(builder.maxHeaderSize, "maxHeaderSize");
         maxRequestBodySize = requirePositive(builder.maxRequestBodySize, "maxRequestBodySize");
+        maxConnections = requirePositive(builder.maxConnections, "maxConnections");
+        maxInflightRequestBytes = requirePositive(
+                builder.maxInflightRequestBytes, "maxInflightRequestBytes");
+        if (maxInflightRequestBytes < maxRequestBodySize) {
+            throw new IllegalArgumentException(
+                    "maxInflightRequestBytes must be at least maxRequestBodySize");
+        }
+        requestReadTimeoutMillis = requirePositive(
+                builder.requestReadTimeoutMillis, "requestReadTimeoutMillis");
         ioThreads = requirePositive(builder.ioThreads, "ioThreads");
         workerThreads = requirePositive(builder.workerThreads, "workerThreads");
         workerMinThreads = builder.workerMinThreads == null
@@ -37,6 +50,7 @@ public final class ServerConfig {
             throw new IllegalArgumentException("workerMinThreads must be between 1 and workerThreads");
         }
         workerQueueCapacity = requirePositive(builder.workerQueueCapacity, "workerQueueCapacity");
+        maxInflightRequests = (long) workerThreads + workerQueueCapacity;
         if (builder.workerIdleTimeoutMillis <= 0) {
             throw new IllegalArgumentException("workerIdleTimeoutMillis must be positive");
         }
@@ -73,6 +87,22 @@ public final class ServerConfig {
 
     public int maxRequestBodySize() {
         return maxRequestBodySize;
+    }
+
+    public int maxConnections() {
+        return maxConnections;
+    }
+
+    public long maxInflightRequests() {
+        return maxInflightRequests;
+    }
+
+    public long maxInflightRequestBytes() {
+        return maxInflightRequestBytes;
+    }
+
+    public long requestReadTimeoutMillis() {
+        return requestReadTimeoutMillis;
     }
 
     public int ioThreads() {
@@ -138,6 +168,9 @@ public final class ServerConfig {
         private int maxInitialLineLength = 8192;
         private int maxHeaderSize = 16384;
         private int maxRequestBodySize = 16 * 1024 * 1024;
+        private int maxConnections = 1024;
+        private long maxInflightRequestBytes = 64L * 1024L * 1024L;
+        private long requestReadTimeoutMillis = 30000L;
         private int ioThreads = Math.max(1, Math.min(2,
                 Runtime.getRuntime().availableProcessors()));
         private int workerThreads = Math.max(4, Runtime.getRuntime().availableProcessors() * 2);
@@ -187,6 +220,21 @@ public final class ServerConfig {
             return this;
         }
 
+        public Builder maxConnections(int value) {
+            maxConnections = value;
+            return this;
+        }
+
+        public Builder maxInflightRequestBytes(long value) {
+            maxInflightRequestBytes = value;
+            return this;
+        }
+
+        public Builder requestReadTimeoutMillis(long value) {
+            requestReadTimeoutMillis = value;
+            return this;
+        }
+
         public Builder ioThreads(int value) {
             ioThreads = value;
             return this;
@@ -220,5 +268,12 @@ public final class ServerConfig {
         public ServerConfig build() {
             return new ServerConfig(this);
         }
+    }
+
+    private static long requirePositive(long value, String field) {
+        if (value <= 0L) {
+            throw new IllegalArgumentException(field + " must be positive");
+        }
+        return value;
     }
 }
