@@ -23,6 +23,8 @@ Known limitations；提交历史不能替代发布说明。
 
 - 未显式指定 `--base` 时使用当前工作目录，使本地开发日志与缓存分别进入工程
   `logs/` 和 `work/`。
+- worker 从固定线程池改为有界弹性池：`--workers` 作为上限，新增 `--min-workers` 与
+  `--worker-idle-timeout`，默认队列容量由 1024 收紧为 100；线程与队列同时饱和时仍返回 503。
 
 ### Fixed
 

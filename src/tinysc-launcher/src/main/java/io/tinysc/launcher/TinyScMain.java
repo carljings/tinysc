@@ -58,17 +58,24 @@ public final class TinyScMain {
         }
         Path war = Paths.get(warValue);
         String contextPath = option(options, "context-path", "");
-        ServerConfig config = ServerConfig.builder()
+        int workerThreads = integerOption(options, "workers",
+                Math.max(4, Runtime.getRuntime().availableProcessors() * 2));
+        ServerConfig.Builder configBuilder = ServerConfig.builder()
                 .bindAddress(option(options, "bind", "127.0.0.1"))
                 .port(integerOption(options, "port", 8080))
                 .contextPath(contextPath)
                 .baseDirectory(Paths.get(option(options, "base", ".")))
                 .ioThreads(integerOption(options, "io-threads", Math.max(1, Math.min(2,
                         Runtime.getRuntime().availableProcessors()))))
-                .workerThreads(integerOption(options, "workers",
-                        Math.max(4, Runtime.getRuntime().availableProcessors() * 2)))
-                .workerQueueCapacity(integerOption(options, "worker-queue", 1024))
-                .build();
+                .workerThreads(workerThreads)
+                .workerQueueCapacity(integerOption(options, "worker-queue", 100))
+                .workerIdleTimeoutMillis(idleTimeoutMillisOption(options, "worker-idle-timeout",
+                        60000L));
+        String minWorkers = options.remove("min-workers");
+        if (minWorkers != null) {
+            configBuilder.workerMinThreads(positiveIntegerOption("min-workers", minWorkers));
+        }
+        ServerConfig config = configBuilder.build();
         if (!options.isEmpty()) {
             throw new IllegalArgumentException("Unknown option: --"
                     + options.keySet().iterator().next());
@@ -90,7 +97,11 @@ public final class TinyScMain {
                 + " at=" + Instant.now()
                 + " war=" + war.toAbsolutePath().normalize()
                 + " base=" + config.baseDirectory()
-                + " context=" + (config.contextPath().isEmpty() ? "/" : config.contextPath()));
+                + " context=" + (config.contextPath().isEmpty() ? "/" : config.contextPath())
+                + " workerMin=" + config.workerMinThreads()
+                + " workerMax=" + config.workerThreads()
+                + " workerQueue=" + config.workerQueueCapacity()
+                + " workerIdleMs=" + config.workerIdleTimeoutMillis());
 
         final TinyScServer server = new TinyScServer(config, war);
         ServerShutdown shutdown = null;
@@ -213,11 +224,37 @@ public final class TinyScMain {
         return value == null ? defaultValue : Integer.parseInt(value);
     }
 
+    private static int positiveIntegerOption(String name, String value) {
+        int parsed = Integer.parseInt(value);
+        if (parsed <= 0) {
+            throw new IllegalArgumentException("Option --" + name + " must be positive");
+        }
+        return parsed;
+    }
+
+    private static long idleTimeoutMillisOption(Map<String, String> options, String name,
+                                                long defaultValue) {
+        String value = options.remove(name);
+        if (value == null) {
+            return defaultValue;
+        }
+        long seconds = Long.parseLong(value);
+        if (seconds <= 0) {
+            throw new IllegalArgumentException("Option --" + name + " must be positive");
+        }
+        try {
+            return Math.multiplyExact(seconds, 1000L);
+        } catch (ArithmeticException overflow) {
+            throw new IllegalArgumentException("Option --" + name + " is too large");
+        }
+    }
+
     private static void usage(PrintStream output) {
         output.println("Usage:");
         output.println("  tinysc inspect <app.war>");
         output.println("  tinysc start --war <app.war> [--port 8080] [--bind 127.0.0.1]");
         output.println("               [--context-path /app] [--base .]");
-        output.println("               [--io-threads N] [--workers N] [--worker-queue N]");
+        output.println("               [--io-threads N] [--workers N] [--min-workers N]");
+        output.println("               [--worker-queue N] [--worker-idle-timeout SECONDS]");
     }
 }

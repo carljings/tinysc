@@ -10,7 +10,7 @@
 
 Java 21 虚拟线程仅作为 2.x 可选执行器，不提高最低运行版本。
 
-## 2026-07-21 当前进度
+## 2026-07-22 当前进度
 
 - alpha 的 HTTP → Filter → Servlet 与真实 Probe WAR 门禁已通过。
 - WAR 安全展开、web.xml、SCI、Listener、Session、类加载、Async 基础和 forward 已提前落地，
@@ -18,5 +18,9 @@ Java 21 虚拟线程仅作为 2.x 可选执行器，不提高最低运行版本�
 - 两个内部 Legacy WAR 均通过 L0；Legacy WAR B 已达到 L1，并验证 Filter → forward → Resource
   JAR 页面链路，L2 受应用本机 License 门禁阻塞；Legacy WAR A 仍受数据库超时影响。
 - 首轮 Tomcat 8.5.100 对照中启动目标通过，RSS 与 p99 目标未通过。
+- worker 已改为有界弹性池，并验证繁忙扩容、容量外 `503`、过载恢复和空闲回落；该 smoke
+  只证明状态正确，不构成与 Tomcat 的新性能对比。
+- Jetty、Undertow、Tomcat 与 Netty 的资源控制设计已完成对照；下一批按独立 ADR 实施连接、
+  在途请求和在途字节预算，以及拆分超时和显式 quiesce。
 - 下一退出条件优先是可达业务依赖下的 L1/L2、multipart/async dispatch/web-fragment，以及
   30 秒以上独立压测端复测。

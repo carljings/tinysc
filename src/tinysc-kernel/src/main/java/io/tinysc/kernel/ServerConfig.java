@@ -13,7 +13,9 @@ public final class ServerConfig {
     private final int maxRequestBodySize;
     private final int ioThreads;
     private final int workerThreads;
+    private final int workerMinThreads;
     private final int workerQueueCapacity;
+    private final long workerIdleTimeoutMillis;
     private final long shutdownGraceMillis;
 
     private ServerConfig(Builder builder) {
@@ -29,7 +31,16 @@ public final class ServerConfig {
         maxRequestBodySize = requirePositive(builder.maxRequestBodySize, "maxRequestBodySize");
         ioThreads = requirePositive(builder.ioThreads, "ioThreads");
         workerThreads = requirePositive(builder.workerThreads, "workerThreads");
+        workerMinThreads = builder.workerMinThreads == null
+                ? Math.min(8, workerThreads) : builder.workerMinThreads.intValue();
+        if (workerMinThreads < 1 || workerMinThreads > workerThreads) {
+            throw new IllegalArgumentException("workerMinThreads must be between 1 and workerThreads");
+        }
         workerQueueCapacity = requirePositive(builder.workerQueueCapacity, "workerQueueCapacity");
+        if (builder.workerIdleTimeoutMillis <= 0) {
+            throw new IllegalArgumentException("workerIdleTimeoutMillis must be positive");
+        }
+        workerIdleTimeoutMillis = builder.workerIdleTimeoutMillis;
         if (builder.shutdownGraceMillis < 0) {
             throw new IllegalArgumentException("shutdownGraceMillis must not be negative");
         }
@@ -72,8 +83,16 @@ public final class ServerConfig {
         return workerThreads;
     }
 
+    public int workerMinThreads() {
+        return workerMinThreads;
+    }
+
     public int workerQueueCapacity() {
         return workerQueueCapacity;
+    }
+
+    public long workerIdleTimeoutMillis() {
+        return workerIdleTimeoutMillis;
     }
 
     public long shutdownGraceMillis() {
@@ -122,7 +141,9 @@ public final class ServerConfig {
         private int ioThreads = Math.max(1, Math.min(2,
                 Runtime.getRuntime().availableProcessors()));
         private int workerThreads = Math.max(4, Runtime.getRuntime().availableProcessors() * 2);
-        private int workerQueueCapacity = 1024;
+        private Integer workerMinThreads;
+        private int workerQueueCapacity = 100;
+        private long workerIdleTimeoutMillis = 60000L;
         private long shutdownGraceMillis = 30000L;
 
         private Builder() {
@@ -176,8 +197,18 @@ public final class ServerConfig {
             return this;
         }
 
+        public Builder workerMinThreads(int value) {
+            workerMinThreads = value;
+            return this;
+        }
+
         public Builder workerQueueCapacity(int value) {
             workerQueueCapacity = value;
+            return this;
+        }
+
+        public Builder workerIdleTimeoutMillis(long value) {
+            workerIdleTimeoutMillis = value;
             return this;
         }
 

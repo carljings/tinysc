@@ -38,11 +38,11 @@ import java.nio.charset.StandardCharsets;
 import java.time.Duration;
 import java.util.List;
 import java.util.Map;
-import java.util.concurrent.ArrayBlockingQueue;
 import java.util.concurrent.RejectedExecutionException;
 import java.util.concurrent.ThreadPoolExecutor;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicLong;
 import java.util.logging.Level;
 import java.util.logging.Logger;
 
@@ -52,9 +52,10 @@ public final class NettyHttpConnector implements AutoCloseable {
     private final ServerConfig config;
     private final WebAppRuntime runtime;
     private final AtomicBoolean started = new AtomicBoolean();
+    private final AtomicLong rejectedRequests = new AtomicLong();
     private EventLoopGroup acceptorGroup;
     private EventLoopGroup ioGroup;
-    private ThreadPoolExecutor applicationExecutor;
+    private BoundedElasticExecutor applicationExecutor;
     private Channel serverChannel;
 
     public NettyHttpConnector(ServerConfig config, WebAppRuntime runtime) {
@@ -74,11 +75,11 @@ public final class NettyHttpConnector implements AutoCloseable {
         ioGroup = new MultiThreadIoEventLoopGroup(
                 config.ioThreads(),
                 new NamedThreadFactory("tinysc-io-", false), NioIoHandler.newFactory());
-        applicationExecutor = new ThreadPoolExecutor(
-                config.workerThreads(), config.workerThreads(), 0L, TimeUnit.MILLISECONDS,
-                new ArrayBlockingQueue<Runnable>(config.workerQueueCapacity()),
-                new NamedThreadFactory("tinysc-worker-", false),
-                new ThreadPoolExecutor.AbortPolicy());
+        rejectedRequests.set(0L);
+        applicationExecutor = new BoundedElasticExecutor(
+                config.workerMinThreads(), config.workerThreads(),
+                config.workerIdleTimeoutMillis(), config.workerQueueCapacity(),
+                new NamedThreadFactory("tinysc-worker-", false));
         try {
             HttpDecoderConfig decoderConfig = new HttpDecoderConfig()
                     .setMaxInitialLineLength(config.maxInitialLineLength())
@@ -130,6 +131,25 @@ public final class NettyHttpConnector implements AutoCloseable {
             throw new IllegalStateException("connector is not started");
         }
         channel.closeFuture().sync();
+    }
+
+    int workerPoolSize() {
+        BoundedElasticExecutor executor = applicationExecutor;
+        return executor == null ? 0 : executor.getPoolSize();
+    }
+
+    int activeWorkerCount() {
+        BoundedElasticExecutor executor = applicationExecutor;
+        return executor == null ? 0 : executor.getActiveCount();
+    }
+
+    int queuedRequestCount() {
+        BoundedElasticExecutor executor = applicationExecutor;
+        return executor == null ? 0 : executor.getQueue().size();
+    }
+
+    long rejectedRequestCount() {
+        return rejectedRequests.get();
     }
 
     @Override
@@ -200,7 +220,7 @@ public final class NettyHttpConnector implements AutoCloseable {
                     applicationExecutor.execute(() -> service(
                             context, request.protocolVersion(), containerRequest, keepAlive));
                 } catch (RejectedExecutionException rejected) {
-                    context.channel().config().setAutoRead(true);
+                    recordRejectedRequest();
                     writeText(context, request.protocolVersion(), HttpResponseStatus.SERVICE_UNAVAILABLE,
                             "tinysc worker queue is full\n", false);
                 }
@@ -219,6 +239,17 @@ public final class NettyHttpConnector implements AutoCloseable {
             } else {
                 context.close();
             }
+        }
+    }
+
+    private void recordRejectedRequest() {
+        long rejected = rejectedRequests.incrementAndGet();
+        if ((rejected & (rejected - 1L)) == 0L) {
+            LOGGER.warning("Worker pool saturated"
+                    + " rejected=" + rejected
+                    + " active=" + activeWorkerCount()
+                    + " pool=" + workerPoolSize()
+                    + " queued=" + queuedRequestCount());
         }
     }
 

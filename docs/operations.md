@@ -12,7 +12,9 @@ java -jar tinysc-1.0.0-alpha-SNAPSHOT.jar start \
   --base /opt/tinysc \
   --io-threads 2 \
   --workers 32 \
-  --worker-queue 1024
+  --min-workers 8 \
+  --worker-idle-timeout 60 \
+  --worker-queue 100
 ```
 
 检查 WAR：
