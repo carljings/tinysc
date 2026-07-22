@@ -7,6 +7,7 @@ import java.util.Arrays;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNull;
+import static org.junit.jupiter.api.Assertions.assertSame;
 
 class ServletMapperTest {
     @Test
@@ -36,6 +37,57 @@ class ServletMapperTest {
         ServletMappingResult root = mapper.map("/api");
         assertEquals("/api", root.servletPath());
         assertNull(root.pathInfo());
+    }
+
+    @Test
+    void reusesThePrebuiltResultForExactMappings() {
+        ServletMapper mapper = new ServletMapper(Arrays.asList(
+                mapping("root", ""),
+                mapping("login", "/login")));
+
+        ServletMappingResult first = mapper.map("/login");
+        ServletMappingResult second = mapper.map("/login");
+        ServletMappingResult root = mapper.map("/");
+
+        assertSame(first, second);
+        assertEquals("/login", first.servletPath());
+        assertNull(first.pathInfo());
+        assertSame(root, mapper.map("/"));
+        assertEquals("root", root.servletName());
+        assertEquals("", root.servletPath());
+    }
+
+    @Test
+    void observesPathAndExtensionPatternBoundaries() {
+        ServletMapper mapper = new ServletMapper(Arrays.asList(
+                mapping("default", "/"),
+                mapping("api", "/api/*"),
+                mapping("action", "*.do")));
+
+        assertEquals("api", mapper.map("/api").servletName());
+        assertEquals("api", mapper.map("/api/").servletName());
+        assertEquals("/", mapper.map("/api/").pathInfo());
+        assertEquals("default", mapper.map("/api2").servletName());
+        assertEquals("default", mapper.map("/api.v2").servletName());
+
+        assertEquals("action", mapper.map("/submit.do").servletName());
+        assertEquals("action", mapper.map("/nested/submit.do").servletName());
+        assertEquals("default", mapper.map("/submit.DO").servletName());
+        assertEquals("default", mapper.map("/submit.do/more").servletName());
+        assertEquals("default", mapper.map("/submit.do.more").servletName());
+    }
+
+    @Test
+    void keepsPathMappingsAheadOfTheDefaultMappingAtTheRoot() {
+        ServletMapper mapper = new ServletMapper(Arrays.asList(
+                mapping("default", "/"),
+                mapping("all", "/*")));
+
+        ServletMappingResult result = mapper.map("/");
+
+        assertEquals("all", result.servletName());
+        assertEquals("", result.servletPath());
+        assertEquals("/", result.pathInfo());
     }
 
     private static WebAppDescriptor.ServletMapping mapping(String name, String pattern) {

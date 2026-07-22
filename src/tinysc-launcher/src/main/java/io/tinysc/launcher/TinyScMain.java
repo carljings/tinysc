@@ -65,13 +65,20 @@ public final class TinyScMain {
                 .port(integerOption(options, "port", 8080))
                 .contextPath(contextPath)
                 .baseDirectory(Paths.get(option(options, "base", ".")))
-                .ioThreads(integerOption(options, "io-threads", Math.max(1, Math.min(2,
+                .ioThreads(integerOption(options, "io-threads", Math.max(1, Math.min(4,
                         Runtime.getRuntime().availableProcessors()))))
                 .maxConnections(positiveIntegerOption(options, "max-connections", 1024))
                 .maxInflightRequestBytes(positiveLongOption(
                         options, "max-inflight-request-bytes", 64L * 1024L * 1024L))
+                .maxRawIngressBytes(positiveLongOption(
+                        options, "max-raw-ingress-bytes", 64L * 1024L * 1024L))
                 .requestReadTimeoutMillis(positiveLongOption(
                         options, "request-read-timeout", 30000L))
+                .requestBodyTimeoutMillis(positiveLongOption(
+                        options, "request-body-timeout", 300000L))
+                .responseWriteTimeoutMillis(positiveLongOption(
+                        options, "response-write-timeout", 30000L))
+                .accessLogEnabled(booleanOption(options, "access-log", true))
                 .workerThreads(workerThreads)
                 .workerQueueCapacity(integerOption(options, "worker-queue", 100))
                 .workerIdleTimeoutMillis(idleTimeoutMillisOption(options, "worker-idle-timeout",
@@ -98,6 +105,10 @@ public final class TinyScMain {
         log.output().println("tinysc log file=" + log.path()
                 + " maxBytes=" + LauncherLog.DEFAULT_MAX_BYTES
                 + " backups=" + LauncherLog.DEFAULT_BACKUPS);
+        if (config.accessLogEnabled()) {
+            log.output().println("tinysc access log file="
+                    + config.baseDirectory().resolve("logs/access.log"));
+        }
         log.output().println("tinysc starting"
                 + " at=" + Instant.now()
                 + " war=" + war.toAbsolutePath().normalize()
@@ -106,7 +117,12 @@ public final class TinyScMain {
                 + " maxConnections=" + config.maxConnections()
                 + " maxInflightRequests=" + config.maxInflightRequests()
                 + " maxInflightRequestBytes=" + config.maxInflightRequestBytes()
+                + " maxRawIngressBytes=" + config.maxRawIngressBytes()
                 + " requestReadTimeoutMs=" + config.requestReadTimeoutMillis()
+                + " requestBodyTimeoutMs=" + config.requestBodyTimeoutMillis()
+                + " responseWriteTimeoutMs=" + config.responseWriteTimeoutMillis()
+                + " accessLog=" + config.accessLogEnabled()
+                + " ioThreads=" + config.ioThreads()
                 + " workerMin=" + config.workerMinThreads()
                 + " workerMax=" + config.workerThreads()
                 + " workerQueue=" + config.workerQueueCapacity()
@@ -260,6 +276,21 @@ public final class TinyScMain {
         return parsed;
     }
 
+    private static boolean booleanOption(Map<String, String> options, String name,
+                                         boolean defaultValue) {
+        String value = options.remove(name);
+        if (value == null) {
+            return defaultValue;
+        }
+        if ("true".equals(value)) {
+            return true;
+        }
+        if ("false".equals(value)) {
+            return false;
+        }
+        throw new IllegalArgumentException("Option --" + name + " must be true or false");
+    }
+
     private static long idleTimeoutMillisOption(Map<String, String> options, String name,
                                                 long defaultValue) {
         String value = options.remove(name);
@@ -286,6 +317,10 @@ public final class TinyScMain {
         output.println("               [--worker-queue N] [--worker-idle-timeout SECONDS]");
         output.println("               [--max-connections N]");
         output.println("               [--max-inflight-request-bytes BYTES]");
+        output.println("               [--max-raw-ingress-bytes BYTES]");
         output.println("               [--request-read-timeout MILLISECONDS]");
+        output.println("               [--request-body-timeout MILLISECONDS]");
+        output.println("               [--response-write-timeout MILLISECONDS]");
+        output.println("               [--access-log true|false]");
     }
 }

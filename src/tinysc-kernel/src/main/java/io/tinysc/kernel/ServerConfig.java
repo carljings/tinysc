@@ -14,7 +14,11 @@ public final class ServerConfig {
     private final int maxConnections;
     private final long maxInflightRequests;
     private final long maxInflightRequestBytes;
+    private final long maxRawIngressBytes;
     private final long requestReadTimeoutMillis;
+    private final long requestBodyTimeoutMillis;
+    private final long responseWriteTimeoutMillis;
+    private final boolean accessLogEnabled;
     private final int ioThreads;
     private final int workerThreads;
     private final int workerMinThreads;
@@ -40,12 +44,23 @@ public final class ServerConfig {
             throw new IllegalArgumentException(
                     "maxInflightRequestBytes must be at least maxRequestBodySize");
         }
+        maxRawIngressBytes = requirePositive(
+                builder.maxRawIngressBytes, "maxRawIngressBytes");
+        if (maxRawIngressBytes < maxRequestBodySize) {
+            throw new IllegalArgumentException(
+                    "maxRawIngressBytes must be at least maxRequestBodySize");
+        }
         requestReadTimeoutMillis = requirePositive(
                 builder.requestReadTimeoutMillis, "requestReadTimeoutMillis");
+        requestBodyTimeoutMillis = requirePositive(
+                builder.requestBodyTimeoutMillis, "requestBodyTimeoutMillis");
+        responseWriteTimeoutMillis = requirePositive(
+                builder.responseWriteTimeoutMillis, "responseWriteTimeoutMillis");
+        accessLogEnabled = builder.accessLogEnabled;
         ioThreads = requirePositive(builder.ioThreads, "ioThreads");
         workerThreads = requirePositive(builder.workerThreads, "workerThreads");
         workerMinThreads = builder.workerMinThreads == null
-                ? Math.min(8, workerThreads) : builder.workerMinThreads.intValue();
+                ? Math.min(2, workerThreads) : builder.workerMinThreads.intValue();
         if (workerMinThreads < 1 || workerMinThreads > workerThreads) {
             throw new IllegalArgumentException("workerMinThreads must be between 1 and workerThreads");
         }
@@ -101,8 +116,24 @@ public final class ServerConfig {
         return maxInflightRequestBytes;
     }
 
+    public long maxRawIngressBytes() {
+        return maxRawIngressBytes;
+    }
+
     public long requestReadTimeoutMillis() {
         return requestReadTimeoutMillis;
+    }
+
+    public long requestBodyTimeoutMillis() {
+        return requestBodyTimeoutMillis;
+    }
+
+    public long responseWriteTimeoutMillis() {
+        return responseWriteTimeoutMillis;
+    }
+
+    public boolean accessLogEnabled() {
+        return accessLogEnabled;
     }
 
     public int ioThreads() {
@@ -170,8 +201,12 @@ public final class ServerConfig {
         private int maxRequestBodySize = 16 * 1024 * 1024;
         private int maxConnections = 1024;
         private long maxInflightRequestBytes = 64L * 1024L * 1024L;
+        private long maxRawIngressBytes = 64L * 1024L * 1024L;
         private long requestReadTimeoutMillis = 30000L;
-        private int ioThreads = Math.max(1, Math.min(2,
+        private long requestBodyTimeoutMillis = 300000L;
+        private long responseWriteTimeoutMillis = 30000L;
+        private boolean accessLogEnabled;
+        private int ioThreads = Math.max(1, Math.min(4,
                 Runtime.getRuntime().availableProcessors()));
         private int workerThreads = Math.max(4, Runtime.getRuntime().availableProcessors() * 2);
         private Integer workerMinThreads;
@@ -230,8 +265,28 @@ public final class ServerConfig {
             return this;
         }
 
+        public Builder maxRawIngressBytes(long value) {
+            maxRawIngressBytes = value;
+            return this;
+        }
+
         public Builder requestReadTimeoutMillis(long value) {
             requestReadTimeoutMillis = value;
+            return this;
+        }
+
+        public Builder requestBodyTimeoutMillis(long value) {
+            requestBodyTimeoutMillis = value;
+            return this;
+        }
+
+        public Builder responseWriteTimeoutMillis(long value) {
+            responseWriteTimeoutMillis = value;
+            return this;
+        }
+
+        public Builder accessLogEnabled(boolean value) {
+            accessLogEnabled = value;
             return this;
         }
 

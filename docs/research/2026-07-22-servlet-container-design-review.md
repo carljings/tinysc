@@ -51,8 +51,8 @@ Undertow 提供请求并发限制 Handler，超过活跃上限后只在有限范
 [Tomcat HTTP connector](https://tomcat.apache.org/tomcat-8.5-doc/config/http)
 
 TinySC 结论：不复制 Jetty 的无界队列。TinySC 的应用池不承担 Netty selector/acceptor 任务，
-因此继续使用有界 worker 队列；下一步在队列之前增加独立的连接数、在途请求数和在途请求字节
-预算。只保留一个等待队列，避免“准入队列 + worker 队列”叠加形成不可见长尾。
+因此继续使用有界 worker 队列；连接数、在途请求数和在途请求字节预算已经位于 worker 队列
+之前。只保留一个等待队列，避免“准入队列 + worker 队列”叠加形成不可见长尾。
 
 ### 2.3 请求和响应内存
 
@@ -70,11 +70,17 @@ Netty 的 `HttpObjectAggregator` 明确把分段 `HttpContent` 合并成一个 `
 Tomcat NIO endpoint 提供 sendfile 状态机，把静态文件发送从 Servlet 堆缓冲路径中分离。
 [Tomcat 8.5 NioEndpoint](https://github.com/apache/tomcat/blob/8.5.100/java/org/apache/tomcat/util/net/NioEndpoint.java)
 
-TinySC 结论：分两步实施，避免一次重写 Servlet I/O：
+TinySC 结论：第一步已经落地为 `maxRawIngressBytes`、`requestBodyTimeoutMillis` 和
+`responseWriteTimeoutMillis`，但这仍不是完整的流式 I/O：
 
-1. 先消除请求体重复 `byte[]` 复制，增加全局在途字节预算，并配置 Netty 写水位。
-2. 再实现 Servlet 响应 commit buffer 和分块写；完成所有权、Async 和断连测试后，才移除通用
-   `HttpObjectAggregator`。静态文件 sendfile 只在剖析证明值得后单独立项。
+1. `maxRawIngressBytes` 负责 raw ingress 预算；`Content-Length` 只做单请求上限早期 `413`，不会一次性
+   预占全量，chunked 按实际分片累计，断开/超时/失败会精确释放已占用额度。
+2. `requestBodyTimeoutMillis` 是总时限；没有更早响应在途时，超时返回 `408` 并关闭连接。
+3. `responseWriteTimeoutMillis` 只是写不完成时关闭连接的 transport guardrail；当前响应仍全量堆缓冲，
+   `ServletOutputStream.isReady()` 和 `WriteListener` 还不是 true non-blocking write。
+4. 下一步才是 Servlet 响应 commit buffer、分块写和真正的流式背压。静态文件 sendfile 只在剖析证明值得后单独立项。
+5. 独立 HTTP access log 已落地，默认由 CLI 开启，嵌入式默认关闭；写侧是独立单线程和有界队列，
+   不进入业务 worker。
 
 ### 2.4 超时与连接状态
 
@@ -82,14 +88,15 @@ Undertow 把 `REQUEST_PARSE_TIMEOUT`、`NO_REQUEST_TIMEOUT`、连接 `IDLE_TIMEO
 并提示过小的连接 idle 值会伤害长请求。
 [Undertow listener timeout options](https://undertow.io/undertow-docs/undertow-docs-2.1.0/listeners.html)
 
-TinySC 结论：当前单个 `ReadTimeoutHandler(30s)` 不能继续同时代表请求头、请求体、业务执行和
-Async 超时。下一批拆成：
+TinySC 结论：现在已经拆成三类可见时限，但它们仍然不同于 Servlet 业务执行时限：
 
-- header 总解析时限；
-- body 进度与总时限；
-- keep-alive 无请求时限；
-- response write 时限；
-- Servlet/Async 自己的业务时限。
+- `requestReadTimeoutMillis` 只覆盖读取/解析和 keep-alive 空闲；完整请求进入应用执行前会暂停固定的
+  `PausableReadTimeoutHandler`，响应完成后恢复并重新计时。
+- `requestBodyTimeoutMillis` 是 body 总时限；没有更早响应在途时，超时返回 `408` 并关闭连接。
+- `responseWriteTimeoutMillis` 只在写不完成时关闭连接，不能被当成响应内存上限或完整背压。
+- 同一 HTTP/1.1 channel 上的后续 pipelined 请求会按顺序处理，当前响应 flush 完成后才会继续读取；
+  后续失败不会抢占当前 exchange。
+- Servlet/Async 业务时限仍然由应用自己的执行语义决定。
 
 ### 2.5 优雅停机与恢复
 
@@ -102,33 +109,32 @@ Jetty 同样按 connector/handler 生命周期排空，并提供低资源监控�
 [Jetty LowResourceMonitor](https://raw.githubusercontent.com/eclipse/jetty.project/jetty-9.4.x/jetty-server/src/main/java/org/eclipse/jetty/server/LowResourceMonitor.java)、
 [Tomcat AbstractEndpoint](https://github.com/apache/tomcat/blob/8.5.100/java/org/apache/tomcat/util/net/AbstractEndpoint.java)
 
-TinySC 结论：保留当前“先关闭监听、再等待 worker”的基本顺序，并补成显式的
-`RUNNING → QUIESCING → STOPPING → STOPPED`。先关闭 readiness 和新请求准入，保留
-worker/EventLoop 完成同步与 Async，达到统一 deadline 后再取消连接并销毁 WebApp。资源压力监控
-先做指标和拒绝，不做自动改变线程数的“智能调参”。
+TinySC 当前已经先关闭监听和新请求准入、等待 transport 在途请求，再让 Servlet runtime 经过
+`RUNNING → QUIESCING → STOPPING → STOPPED`。外部 readiness URL 和跨 connector/runtime 的统一
+deadline 尚未实现，保留到 P0-3；资源压力监控也先做指标和拒绝，不做自动改变线程数的“智能调参”。
 
 ### 2.6 启动扫描
 
 Jetty 提供预扫描 quickstart 思路，但这不是跳过 Servlet 语义：存在 `@HandlesTypes` 时仍要得到
 正确匹配集合。[Jetty quickstart](https://jetty.org/docs/jetty/12.1/operations-guide/quickstart/index.html)
 
-TinySC 结论：缓存的是 JAR/class header/资源索引，不缓存 Servlet、SCI 或 Spring 实例；每次启动
-仍串行执行 SCI、Listener、Filter 和 load-on-startup Servlet。`metadata-complete=true` 不能被当作
-无条件跳过 `@HandlesTypes` 的开关。
+TinySC 当前只持久化安全展开缓存；JAR/class header/资源索引缓存仍是计划。后续缓存也不能保存
+Servlet、SCI 或 Spring 实例；每次启动仍应执行 SCI、Listener、Filter 和 load-on-startup Servlet。
+`metadata-complete=true` 不能被当作无条件跳过 `@HandlesTypes` 的开关。
 
 ## 3. 取其精华
 
-| 来源 | 借鉴内容 | TinySC 实施方式 |
+| 来源 | 借鉴内容 | TinySC 当前实施状态 |
 |---|---|---|
 | Tomcat | `submittedCount + TaskQueue` | 已用于有界弹性 Worker，并保留快速 503 |
-| Tomcat | `maxConnections / acceptCount` | 增加独立于 worker 的连接计数与准入，不照搬 `LimitLatch` |
+| Tomcat | `maxConnections / acceptCount` | 已实现独立于 worker 的连接计数与准入，不照搬 `LimitLatch` |
 | Tomcat | sendfile | 暂不实现；只在静态资源剖析证明值得后采用 Netty 零拷贝或分块路径 |
-| Jetty | QoS 与低资源模式 | 在 worker 前做独立请求/字节预算；暴露低资源状态 |
-| Jetty | 线程、队列、leased/idle 指标 | 只实现 TinySC 必需的 active/pool/queue/reject 指标 |
+| Jetty | QoS 与低资源模式 | worker 前的请求/字节预算已实现；可查询低资源状态仍是计划 |
+| Jetty | 线程、队列、leased/idle 指标 | 内部 active/pool/queue/reject 计数已存在；运维端点仍是计划 |
 | Undertow | I/O 与阻塞 dispatch 边界 | Netty EventLoop 永不执行 Servlet 业务 |
-| Undertow | Handler 组合和完成监听 | 准入、超时、访问日志、优雅停机做成小型有序阶段 |
-| Undertow | 拆分超时 | header/body/keep-alive/write/application 各自计时 |
-| Netty | write watermark、分段消息 | 慢客户端触发背压；后续实现流式 Servlet 输出 |
+| Undertow | Handler 组合和完成监听 | 准入、超时和访问日志已拆分；外部 readiness 与运维状态仍是计划 |
+| Undertow | 拆分超时 | read/keep-alive 共用 idle timeout，body 总时限和 write timeout 已独立；应用时限由应用控制，独立 header 总时限仍是计划 |
+| Netty | write watermark、分段消息 | write timeout guardrail 已实现；watermark 和流式背压仍是计划 |
 
 ## 4. 弃其糟粕或不适合 TinySC 的部分
 
@@ -144,9 +150,10 @@ TinySC 结论：缓存的是 JAR/class header/资源索引，不缓存 Servlet�
 
 ## 5. 转化后的实施顺序
 
-1. **P0-2 准入与连接正确性**：连接/请求/字节预算、同连接有序处理、拆分超时、过载恢复。
-2. **P0-3 优雅停机与可观测性**：quiesce、统一 deadline、ready/live、worker/queue/reject/connection
-   指标和访问日志。
+1. **P0-2 准入与连接正确性（已实现，最终验证待执行）**：连接/请求/字节预算、同连接有序处理、
+   拆分超时、过载恢复。
+2. **P0-3 优雅停机与可观测性（部分实现）**：quiesce 和访问日志已实现；统一 deadline、ready/live、
+   worker/queue/reject/connection 运维指标仍是计划。
 3. **P1 流式 I/O**：去除请求重复复制、response watermark、Servlet commit buffer；静态资源
    sendfile 只在剖析证明是瓶颈后实施。
 4. **P1 启动缓存**：SCI/class header/resource index 指纹缓存和有界并行解析。
@@ -154,4 +161,4 @@ TinySC 结论：缓存的是 JAR/class header/资源索引，不缓存 Servlet�
    分类或虚拟线程执行器。
 
 每项进入源码前需要单独 ADR；性能与稳定性继续使用 `docs/performance.md` 的同机差分、过载恢复和
-24/72 小时门禁。
+1 小时 / 24 小时门禁。

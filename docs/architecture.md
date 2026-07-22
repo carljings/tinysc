@@ -56,6 +56,50 @@ flowchart LR
 
 ## 4. 启动事务
 
+### 源码级启动类图
+
+```mermaid
+classDiagram
+    class TinyScMain {
+        +main(String[])
+        +run(String[], PrintStream, PrintStream) int
+    }
+    class TinyScServer {
+        +start() int
+        +await()
+        +close()
+    }
+    class WarDeploymentManager {
+        +prepare(Path, Path, String, ClassLoader) PreparedWebApp
+    }
+    class PreparedWebApp
+    class WebAppRuntime {
+        <<interface>>
+        +start()
+        +service(ContainerExchange)
+        +stop(Duration)
+    }
+    class JavaxServletRuntime
+    class NettyHttpConnector {
+        +start() int
+        +await()
+        +close()
+    }
+
+    TinyScMain --> TinyScServer : 解析配置并创建
+    TinyScServer --> WarDeploymentManager : 准备 WAR
+    WarDeploymentManager --> PreparedWebApp : 返回
+    TinyScServer --> JavaxServletRuntime : 创建并初始化
+    JavaxServletRuntime ..|> WebAppRuntime
+    TinyScServer --> NettyHttpConnector : 最后创建并绑定端口
+    NettyHttpConnector --> WebAppRuntime : 分派请求
+```
+
+启动入口是 `TinyScMain`。它解析 `start` 参数并安装启动日志，然后由 `TinyScServer.start()` 依次
+准备 WAR、启动 `JavaxServletRuntime`，最后调用 `NettyHttpConnector.start()`。真正的 socket 监听
+发生在 `NettyHttpConnector` 的 `ServerBootstrap.bind(...)`；它排在 Listener、Filter 和
+load-on-startup Servlet 初始化之后，因此日志出现 `tinysc ready` 时应用才开始对外接流量。
+
 ```text
 读取配置
 → 检查 WAR/namespace/Java 字节码
@@ -93,7 +137,15 @@ sequenceDiagram
 应用 Filter、Servlet、Listener 永远不在 Netty I/O 线程执行。工作队列满时返回 503，
 不能无限排队。
 
-单 WAR 默认只创建 2 个 I/O 线程；阻塞业务代码进入独立、有界的 worker 池。两者都可在启动
+源码中的关键交接点是：Netty pipeline 完成协议、超时、raw ingress 和聚合校验后，
+`RequestHandler.channelRead0(...)` 取得请求准入 lease，并将任务提交给 `BoundedElasticExecutor`；
+worker 构造 `ContainerRequest` / `ContainerResponse` / `ContainerExchange` 后调用
+`JavaxServletRuntime.service(...)`。运行时先用 `ServletMapper` 找到 Servlet，再按 URL、Servlet 名称和
+`DispatcherType` 组装 Filter 链，最后由 `ApplicationFilterChain` 调用目标 `Servlet.service(...)`。
+响应快照回到 Netty event loop 写出；完成、超时、断连和拒绝路径都必须释放对应的连接、请求与字节
+额度。
+
+单 WAR 默认创建 `min(4, CPU)` 个 I/O 线程；阻塞业务代码进入独立、有界的 worker 池。两者都可在启动
 参数中明确设置，性能报告必须记录实际值。
 
 ## 6. 类加载

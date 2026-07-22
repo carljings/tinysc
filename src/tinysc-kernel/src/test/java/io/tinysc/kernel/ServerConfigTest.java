@@ -3,7 +3,9 @@ package io.tinysc.kernel;
 import org.junit.jupiter.api.Test;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class ServerConfigTest {
     @Test
@@ -24,7 +26,7 @@ class ServerConfigTest {
     @Test
     void keepsIoThreadPoolExplicitAndBounded() {
         int defaultThreads = ServerConfig.builder().build().ioThreads();
-        assertEquals(Math.max(1, Math.min(2, Runtime.getRuntime().availableProcessors())),
+        assertEquals(Math.max(1, Math.min(4, Runtime.getRuntime().availableProcessors())),
                 defaultThreads);
         assertEquals(3, ServerConfig.builder().ioThreads(3).build().ioThreads());
         assertThrows(IllegalArgumentException.class,
@@ -34,12 +36,15 @@ class ServerConfigTest {
     @Test
     void defaultsWorkerMinimumAndIdleTimeoutFromWorkerMaximum() {
         ServerConfig defaultConfig = ServerConfig.builder().build();
-        assertEquals(Math.min(8, defaultConfig.workerThreads()), defaultConfig.workerMinThreads());
+        assertEquals(Math.min(2, defaultConfig.workerThreads()), defaultConfig.workerMinThreads());
         assertEquals(100, defaultConfig.workerQueueCapacity());
         assertEquals(60000L, defaultConfig.workerIdleTimeoutMillis());
 
         ServerConfig smallPoolConfig = ServerConfig.builder().workerThreads(3).build();
-        assertEquals(3, smallPoolConfig.workerMinThreads());
+        assertEquals(2, smallPoolConfig.workerMinThreads());
+
+        ServerConfig singleWorkerConfig = ServerConfig.builder().workerThreads(1).build();
+        assertEquals(1, singleWorkerConfig.workerMinThreads());
     }
 
     @Test
@@ -72,7 +77,10 @@ class ServerConfigTest {
         assertEquals((long) defaults.workerThreads() + defaults.workerQueueCapacity(),
                 defaults.maxInflightRequests());
         assertEquals(64L * 1024L * 1024L, defaults.maxInflightRequestBytes());
+        assertEquals(64L * 1024L * 1024L, defaults.maxRawIngressBytes());
         assertEquals(30000L, defaults.requestReadTimeoutMillis());
+        assertEquals(300000L, defaults.requestBodyTimeoutMillis());
+        assertEquals(30000L, defaults.responseWriteTimeoutMillis());
 
         ServerConfig explicit = ServerConfig.builder()
                 .workerThreads(3)
@@ -80,12 +88,18 @@ class ServerConfigTest {
                 .maxConnections(7)
                 .maxRequestBodySize(1024)
                 .maxInflightRequestBytes(4096L)
+                .maxRawIngressBytes(8192L)
                 .requestReadTimeoutMillis(1500L)
+                .requestBodyTimeoutMillis(2500L)
+                .responseWriteTimeoutMillis(3500L)
                 .build();
         assertEquals(7, explicit.maxConnections());
         assertEquals(8L, explicit.maxInflightRequests());
         assertEquals(4096L, explicit.maxInflightRequestBytes());
+        assertEquals(8192L, explicit.maxRawIngressBytes());
         assertEquals(1500L, explicit.requestReadTimeoutMillis());
+        assertEquals(2500L, explicit.requestBodyTimeoutMillis());
+        assertEquals(3500L, explicit.responseWriteTimeoutMillis());
     }
 
     @Test
@@ -95,11 +109,28 @@ class ServerConfigTest {
         assertThrows(IllegalArgumentException.class,
                 () -> ServerConfig.builder().maxInflightRequestBytes(0L).build());
         assertThrows(IllegalArgumentException.class,
+                () -> ServerConfig.builder().maxRawIngressBytes(0L).build());
+        assertThrows(IllegalArgumentException.class,
                 () -> ServerConfig.builder().requestReadTimeoutMillis(0L).build());
+        assertThrows(IllegalArgumentException.class,
+                () -> ServerConfig.builder().requestBodyTimeoutMillis(0L).build());
+        assertThrows(IllegalArgumentException.class,
+                () -> ServerConfig.builder().responseWriteTimeoutMillis(0L).build());
         assertThrows(IllegalArgumentException.class,
                 () -> ServerConfig.builder()
                         .maxRequestBodySize(1024)
                         .maxInflightRequestBytes(512L)
                         .build());
+        assertThrows(IllegalArgumentException.class,
+                () -> ServerConfig.builder()
+                        .maxRequestBodySize(1024)
+                        .maxRawIngressBytes(512L)
+                        .build());
+    }
+
+    @Test
+    void keepsEmbeddedAccessLogDisabledUnlessExplicitlyEnabled() {
+        assertFalse(ServerConfig.builder().build().accessLogEnabled());
+        assertTrue(ServerConfig.builder().accessLogEnabled(true).build().accessLogEnabled());
     }
 }

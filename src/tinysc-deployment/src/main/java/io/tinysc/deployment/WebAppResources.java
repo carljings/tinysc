@@ -14,6 +14,7 @@ import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.jar.JarEntry;
 import java.util.jar.JarFile;
 
@@ -23,12 +24,14 @@ public final class WebAppResources {
     private final Path webRoot;
     private final Map<String, URL> jarResources;
     private final Map<String, Set<String>> jarResourcePaths;
+    private final ConcurrentHashMap<String, URL> fileResourceCache;
 
     private WebAppResources(Path webRoot, Map<String, URL> jarResources,
                             Map<String, Set<String>> jarResourcePaths) {
         this.webRoot = webRoot;
         this.jarResources = jarResources;
         this.jarResourcePaths = jarResourcePaths;
+        fileResourceCache = new ConcurrentHashMap<String, URL>();
     }
 
     public static WebAppResources create(Path webRoot) throws IOException {
@@ -64,12 +67,18 @@ public final class WebAppResources {
         if (normalized == null) {
             return null;
         }
+        URL cached = fileResourceCache.get(normalized);
+        if (cached != null) {
+            return cached;
+        }
         Path file = resolve(normalized);
         if (file != null && Files.exists(file)) {
             if (normalized.endsWith("/") && !Files.isDirectory(file)) {
                 return null;
             }
-            return file.toUri().toURL();
+            URL resource = file.toUri().toURL();
+            URL existing = fileResourceCache.putIfAbsent(normalized, resource);
+            return existing == null ? resource : existing;
         }
         if (isShadowedByFile(normalized)) {
             return null;

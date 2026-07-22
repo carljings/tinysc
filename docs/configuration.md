@@ -12,14 +12,18 @@ tinysc 1.x alpha 只接受命令行配置。未知参数、重复参数、缺少
 | `--port` | 否 | `8080` | HTTP 端口；测试代码可用 `0` 请求随机端口 |
 | `--context-path` | 否 | 根 Context | 空值或 `/` 表示根；非根值必须以 `/` 开头且不能以 `/` 结尾 |
 | `--base` | 否 | `.` | 当前工作目录；展开缓存和 `logs/tinysc.log` 的实例根目录 |
-| `--io-threads` | 否 | `min(2, CPU)`，至少 1 | Netty I/O 线程数 |
+| `--io-threads` | 否 | `min(4, CPU)`，至少 1 | Netty I/O 线程数；多核环境默认 4 以降低 HTTP 解码、响应写回与 access-log producer 的竞争 |
 | `--workers` | 否 | `max(4, CPU × 2)` | 工作线程上限，不是固定线程数 |
-| `--min-workers` | 否 | `min(8, --workers)` | 核心保留线；已创建的 worker 回落到该值后不再因空闲被回收 |
+| `--min-workers` | 否 | `min(2, --workers)` | 核心保留线；较低默认值会减少首波创建，把更多容量交给突发时的弹性扩容 |
 | `--worker-idle-timeout` | 否 | `60` | worker 空闲回收超时时间，单位秒 |
 | `--worker-queue` | 否 | `100` | 有界工作队列容量；现有 worker 都繁忙且未触顶时优先扩容，饱和时新请求返回 503 |
 | `--max-connections` | 否 | `1024` | 同时保持的 TCP 连接上限；超限的新连接直接关闭 |
-| `--max-inflight-request-bytes` | 否 | `64 MiB` | 已聚合且通过准入、正在处理的请求体字节上限；不是流式 ingress 保护 |
+| `--max-inflight-request-bytes` | 否 | `64 MiB` | 已聚合且仍被保留的请求体字节上限；不是 raw ingress 预留，也不是流式 ingress 保护 |
+| `--max-raw-ingress-bytes` | 否 | `64 MiB` | 请求体 raw ingress 预算；`Content-Length` 只做单请求上限早期 `413`，不会一次性预占全量，chunked 按实际分片累计，断开/超时/失败会精确释放 |
 | `--request-read-timeout` | 否 | `30000` | 读取/解析和 keep-alive 空闲超时，单位毫秒；只在读取阶段生效，Servlet/Async 执行不受影响 |
+| `--request-body-timeout` | 否 | `300000` | 请求体总时限，单位毫秒；没有更早响应在途时，超时返回 `408` 并关闭连接 |
+| `--response-write-timeout` | 否 | `30000` | 响应写超时，单位毫秒；只在写不完成时关闭连接，是 transport guardrail |
+| `--access-log` | 否 | `true` | 独立 HTTP access log；CLI 默认开启，嵌入式 `ServerConfig` 默认关闭；写入 `<base>/logs/access.log`，可用 `--access-log false` 关闭 |
 
 示例：
 
@@ -30,14 +34,18 @@ java -jar tinysc-1.0.0-alpha-SNAPSHOT.jar start \
   --port 8080 \
   --context-path /example \
   --base /var/lib/tinysc/example \
-  --io-threads 2 \
+  --io-threads 4 \
   --workers 32 \
-  --min-workers 8 \
+  --min-workers 2 \
   --worker-idle-timeout 60 \
   --worker-queue 100 \
   --max-connections 1024 \
   --max-inflight-request-bytes 67108864 \
-  --request-read-timeout 30000
+  --max-raw-ingress-bytes 67108864 \
+  --request-read-timeout 30000 \
+  --request-body-timeout 300000 \
+  --response-write-timeout 30000 \
+  --access-log true
 ```
 
 worker 调度规则如下：
@@ -47,12 +55,18 @@ worker 调度规则如下：
 - Netty I/O 线程不做 `CallerRuns` 兜底，避免接入线程被业务阻塞。
 - 线程和队列都饱和时，对外返回 `503`。
 - `maxInflightRequests` 是派生值，等于 `--workers + --worker-queue`，不是独立 CLI 参数。
-- `--max-inflight-request-bytes` 限制的是已经聚合且通过准入、正在处理的请求体字节，不是 raw ingress 流控。
+- `--max-inflight-request-bytes` 限制的是已经聚合且仍被保留的请求体字节；`--max-raw-ingress-bytes`
+  是 raw ingress 预算；`Content-Length` 只做单请求上限早期 `413`，不会一次性预占全量，chunked 按实际分片累计，断开/超时/失败会精确释放。
 - `--request-read-timeout` 只覆盖读取/解析和 keep-alive 空闲阶段，不会中断 Servlet/Async 执行。
+- `--request-body-timeout` 是请求体总时限；没有更早响应在途时，超时会返回 `408` 并关闭连接。
+- `--response-write-timeout` 只在写不完成时关闭连接，不是响应堆内存上限或完整背压。
+- `--access-log` 默认开启；显式传 `false` 可关闭。
+- 同一 HTTP/1.1 channel 上的后续 pipelined 请求会等前一个响应 flush 完成后再继续读取，失败不会抢占当前 exchange。
 
-## alpha 固定限制
+## alpha 默认值与硬约束
 
-这些限制已在内核中生效，仍保持固定或暂未暴露为独立 CLI 参数：
+以下值中，HTTP 请求行、Header、聚合请求体、Listen backlog 和优雅停止等待仍是硬约束；
+`maxRawIngressBytes` 与三类时限已通过 CLI 暴露，默认值列在上表。
 
 | 限制 | 当前值 |
 |---|---:|
@@ -62,16 +76,23 @@ worker 调度规则如下：
 | Listen backlog | 256 |
 | 优雅停止等待 | 30 秒 |
 
-请求体当前在进入 Servlet 前完整聚合，因此 16 MiB 不是上传能力承诺。`maxInflightRequestBytes`
-只约束已经聚合且通过准入、正在处理的请求数据，不是 streaming/raw ingress 保护；`FlowControlHandler`
-只会让同一 HTTP/1.1 channel 在前一个响应 flush 后再继续读取。`--request-read-timeout` 只覆盖
-读取/解析和 keep-alive 空闲阶段，不会中断 Servlet/Async 执行。multipart、流式上传和 Servlet 非阻塞
-I/O 尚未完成；大文件场景不能以调大上限代替流式实现。
+请求体当前在进入 Servlet 前仍会完整聚合，因此 16 MiB 不是上传能力承诺。`maxRawIngressBytes`
+现在按实际到达的 raw bytes 增量占用；`Content-Length` 只做单请求上限早期 `413`，不会一次性预占全量，
+chunked 按实际分片累计，断开、超时或失败都会精确释放已占用额度。`maxInflightRequestBytes`
+只约束已经聚合且仍被保留的请求体字节，不是 raw ingress 预留。`--request-read-timeout`
+只覆盖读取/解析和 keep-alive 空闲阶段，不会中断 Servlet/Async 执行；`--request-body-timeout` 只管请求体总时限，
+没有更早响应在途时超时返回 `408` 并关闭连接；`--response-write-timeout` 只在写不完成时关闭连接，是 transport guardrail，
+不是响应堆内存上限或完整背压。当前 response 仍全量堆缓冲，Servlet `WriteListener` / `isReady`
+还不是 true non-blocking write。multipart、流式上传和 Servlet 非阻塞 I/O 尚未完成；大文件场景不能以调大上限代替流式实现。
+同一 HTTP/1.1 channel 上后续 pipelined 请求会按顺序等待当前响应 flush 完成，raw、解码、聚合或 Expect 失败不会抢占正在执行的
+exchange，也不会提前发出 `100 Continue`；为保持响应顺序，后续失败不另行插入错误响应。当前只有全局 raw ingress 预算和单请求体上限，
+没有独立的每连接公平份额；单连接可以占用全局预算，但不能突破全局硬边界。
 
 ## 生产建议
 
 - 一个进程只运行一个 WAR，并为每个实例使用独立 `--base`。
-- 确保 `--base/logs` 可写并纳入磁盘容量监控；进程日志默认每份 64 MiB，保留 5 份轮转备份。
+- 确保 `--base/logs` 可写并纳入磁盘容量监控；进程日志默认每份 64 MiB，保留 5 份轮转备份，
+  访问日志默认写到 `<base>/logs/access.log`，可用 `--access-log false` 关闭。
 - 默认只绑定回环地址；由反向代理负责公网 TLS、访问日志和流量治理。
 - `--workers` 是上限，`--min-workers` 和 `--worker-idle-timeout` 控制回落与恢复；线程数应通过
  真实业务压测调整。增加 worker 只会提高可并行阻塞调用数，不保证降低延迟。

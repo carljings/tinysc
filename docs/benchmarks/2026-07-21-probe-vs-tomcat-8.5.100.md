@@ -73,7 +73,7 @@ JAVA_HOME=$(/usr/libexec/java_home -v 1.8) mvn clean package
 JAVA_HOME=$(/usr/libexec/java_home -v 1.8) \
 TOMCAT_HOME=/absolute/path/to/apache-tomcat-8.5.100 \
 REPETITIONS=5 REQUESTS=20000 WARMUP_REQUESTS=2000 \
-CONCURRENCY=32 WORKERS=32 IO_THREADS=2 \
+CONCURRENCY=32 WORKERS=32 IO_THREADS=4 \
 bash src/tools/benchmark/compare-tomcat.sh
 ```
 

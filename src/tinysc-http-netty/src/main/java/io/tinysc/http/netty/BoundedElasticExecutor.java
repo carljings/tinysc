@@ -1,6 +1,6 @@
 package io.tinysc.http.netty;
 
-import java.util.concurrent.ArrayBlockingQueue;
+import java.util.concurrent.LinkedBlockingQueue;
 import java.util.concurrent.RejectedExecutionException;
 import java.util.concurrent.ThreadFactory;
 import java.util.concurrent.ThreadPoolExecutor;
@@ -8,13 +8,23 @@ import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 
 final class BoundedElasticExecutor extends ThreadPoolExecutor {
+    private static final long HANDOFF_RETRY_MILLIS = 1L;
+
     private final GrowthQueue workQueue;
     private final AtomicInteger submittedTasks = new AtomicInteger();
 
     BoundedElasticExecutor(int minimumThreads, int maximumThreads,
                            long idleTimeoutMillis, int queueCapacity,
                            ThreadFactory threadFactory) {
-        this(new GrowthQueue(queueCapacity), minimumThreads, maximumThreads,
+        this(minimumThreads, maximumThreads, idleTimeoutMillis, queueCapacity,
+                HANDOFF_RETRY_MILLIS, threadFactory);
+    }
+
+    BoundedElasticExecutor(int minimumThreads, int maximumThreads,
+                           long idleTimeoutMillis, int queueCapacity,
+                           long handoffRetryMillis, ThreadFactory threadFactory) {
+        this(new GrowthQueue(queueCapacity, handoffRetryMillis),
+                minimumThreads, maximumThreads,
                 idleTimeoutMillis, threadFactory);
     }
 
@@ -50,13 +60,15 @@ final class BoundedElasticExecutor extends ThreadPoolExecutor {
         return submittedTasks.get();
     }
 
-    private static final class GrowthQueue extends ArrayBlockingQueue<Runnable> {
+    private static final class GrowthQueue extends LinkedBlockingQueue<Runnable> {
         private static final long serialVersionUID = 1L;
 
+        private final long handoffRetryMillis;
         private BoundedElasticExecutor executor;
 
-        private GrowthQueue(int capacity) {
+        private GrowthQueue(int capacity, long handoffRetryMillis) {
             super(capacity);
+            this.handoffRetryMillis = handoffRetryMillis;
         }
 
         private void executor(BoundedElasticExecutor value) {
@@ -78,7 +90,15 @@ final class BoundedElasticExecutor extends ThreadPoolExecutor {
         }
 
         private boolean force(Runnable task) {
-            return super.offer(task);
+            if (super.offer(task)) {
+                return true;
+            }
+            try {
+                return super.offer(task, handoffRetryMillis, TimeUnit.MILLISECONDS);
+            } catch (InterruptedException interrupted) {
+                Thread.currentThread().interrupt();
+                return false;
+            }
         }
     }
 }

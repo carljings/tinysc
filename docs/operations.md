@@ -1,6 +1,6 @@
 # 运行手册
 
-> 当前为 alpha，以下启动和检查命令已经可用；生产健康端点、访问日志和完整配置文件仍在开发。
+> 当前为 alpha，以下启动和检查命令已经可用；生产健康端点和完整配置文件仍在开发。
 
 ## 启动命令
 
@@ -10,14 +10,18 @@ java -jar tinysc-1.0.0-alpha-SNAPSHOT.jar start \
   --context-path /example \
   --port 8080 \
   --base /opt/tinysc \
-  --io-threads 2 \
+  --io-threads 4 \
   --workers 32 \
-  --min-workers 8 \
+  --min-workers 2 \
   --worker-idle-timeout 60 \
   --worker-queue 100 \
   --max-connections 1024 \
   --max-inflight-request-bytes 67108864 \
-  --request-read-timeout 30000
+  --max-raw-ingress-bytes 67108864 \
+  --request-read-timeout 30000 \
+  --request-body-timeout 300000 \
+  --response-write-timeout 30000 \
+  --access-log true
 ```
 
 检查 WAR：
@@ -30,14 +34,22 @@ java -jar tinysc-1.0.0-alpha-SNAPSHOT.jar inspect /path/to/app.war
 exploded WebApp 目录，可用于开发测试跳过 WAR 打包与展开。
 未指定 `--base` 时，当前工作目录就是实例根目录，日志默认写入工程的 `logs/tinysc.log`。
 生产环境应显式传入每个实例独立的 `--base`。
+`--access-log` 默认开启；需要关闭时传 `--access-log false`。
 
 ## 准入与超时
 
 - `--max-connections` 限制同时保持的 TCP 连接数；超过上限的新连接会直接关闭。
 - `maxInflightRequests` 由 `--workers + --worker-queue` 推导；达到上限后，新请求会返回 `503`，随后关闭连接。
-- `--max-inflight-request-bytes` 限制已经聚合且通过准入、正在处理的请求体字节；超限时同样返回 `503` 并关闭连接。
+- `--max-inflight-request-bytes` 限制已经聚合且仍被保留的请求体字节；
+  `--max-raw-ingress-bytes` 约束实际到达的请求体 payload，`Content-Length` 只做单请求上限早期
+  `413`，不会一次性预占全量，chunked 按实际分片累计，断开/超时/失败会精确释放。
 - `--request-read-timeout` 只覆盖读取/解析和 keep-alive 空闲阶段，Servlet/Async 执行不会被它中断。
+- `--request-body-timeout` 是请求体总时限；没有更早响应在途时，超时返回 `408` 并关闭连接。
+- `--response-write-timeout` 只在写不完成时关闭连接，是 transport guardrail，不是响应堆内存上限或完整背压。
 - 同一 HTTP/1.1 channel 上的后续请求会等前一个响应 flush 完成后再继续读取。
+- 当前响应仍全量堆缓冲；`ServletOutputStream.isReady()` 和 `WriteListener` 只是兼容形状，不是真正的非阻塞写。
+- 同一连接上后续 pipelined 请求的 raw、解码、聚合或 Expect 失败会顺序关闭，不会抢占当前正在执行的
+  exchange 或提前发出 `100 Continue`；当前响应先完成，再清理租约。为保持响应顺序，后续失败不另行插入错误响应。
 
 ## 运行目录
 
@@ -45,7 +57,9 @@ exploded WebApp 目录，可用于开发测试跳过 WAR 打包与展开。
 $TINYSC_BASE/
 ├── logs/
 │   ├── tinysc.log
-│   └── tinysc.log.1 ... tinysc.log.5
+│   ├── tinysc.log.1 ... tinysc.log.5
+│   ├── access.log
+│   └── access.log.1 ... access.log.5
 └── work/<context>/<war-sha256>/
 
 $JAVA_IO_TMPDIR/
@@ -73,7 +87,12 @@ systemd 或 Docker 仍可以按原方式采集 stdout/stderr。
 
 启动时无法创建或打开日志文件会直接终止启动，避免应用在没有持久化启动证据的情况下运行。
 业务 WAR 自行配置的 Log4j/Logback 文件 appender 不受 TinySC 接管；它们的路径、轮转和保留策略仍由
-业务应用负责。当前记录的是进程和应用控制台日志；独立 HTTP 访问日志尚未实现。
+业务应用负责。启用 `--access-log` 时，独立 HTTP access log 会写入 `<base>/logs/access.log`，
+按 64 MiB 轮转并保留 5 份备份；关闭进程时会 drain 队列并 flush 后退出。关闭 access log 时，
+目录树中的 `access.log*` 不会由 TinySC 创建。
+每行字段使用紧凑格式：`ts remote method path proto status bytes durUs ka outcome`，其中 `ts`
+是 epoch millis，`ka` 是 `0/1`。`path` 只记录 URI path，不记录 query string、Header、Cookie 或
+请求体；空白和控制字符会替换为 `_`。`remote` 是直接 TCP peer，不采信 `X-Forwarded-*`。
 
 持续查看：
 

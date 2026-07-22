@@ -51,6 +51,7 @@ final class TinyServletContext implements ServletContext, AutoCloseable {
     private final JavaxServletRuntime registry;
     private final Map<String, String> initParameters;
     private final Map<String, Object> attributes = new ConcurrentHashMap<String, Object>();
+    private final Map<String, String> mimeTypeCache = new ConcurrentHashMap<String, String>();
     private final TinySessionCookieConfig sessionCookieConfig;
     private final Set<String> roles = new LinkedHashSet<String>();
     private final Path tempDirectory;
@@ -103,12 +104,17 @@ final class TinyServletContext implements ServletContext, AutoCloseable {
 
     @Override
     public String getMimeType(String file) {
+        String cached = mimeTypeCache.get(file);
+        if (cached != null) {
+            return cached;
+        }
         try {
             Path candidate = webRoot.resolve(file).normalize();
             if (candidate.startsWith(webRoot)) {
                 String detected = Files.probeContentType(candidate);
                 if (detected != null) {
-                    return detected;
+                    String existing = mimeTypeCache.putIfAbsent(file, detected);
+                    return existing == null ? detected : existing;
                 }
             }
         } catch (IOException ignored) {
@@ -116,25 +122,39 @@ final class TinyServletContext implements ServletContext, AutoCloseable {
         }
         String lower = file.toLowerCase(java.util.Locale.ROOT);
         if (lower.endsWith(".html") || lower.endsWith(".htm")) {
-            return "text/html";
+            String detected = "text/html";
+            String existing = mimeTypeCache.putIfAbsent(file, detected);
+            return existing == null ? detected : existing;
         }
         if (lower.endsWith(".css")) {
-            return "text/css";
+            String detected = "text/css";
+            String existing = mimeTypeCache.putIfAbsent(file, detected);
+            return existing == null ? detected : existing;
         }
         if (lower.endsWith(".js")) {
-            return "application/javascript";
+            String detected = "application/javascript";
+            String existing = mimeTypeCache.putIfAbsent(file, detected);
+            return existing == null ? detected : existing;
         }
         if (lower.endsWith(".json")) {
-            return "application/json";
+            String detected = "application/json";
+            String existing = mimeTypeCache.putIfAbsent(file, detected);
+            return existing == null ? detected : existing;
         }
         if (lower.endsWith(".png")) {
-            return "image/png";
+            String detected = "image/png";
+            String existing = mimeTypeCache.putIfAbsent(file, detected);
+            return existing == null ? detected : existing;
         }
         if (lower.endsWith(".jpg") || lower.endsWith(".jpeg")) {
-            return "image/jpeg";
+            String detected = "image/jpeg";
+            String existing = mimeTypeCache.putIfAbsent(file, detected);
+            return existing == null ? detected : existing;
         }
         if (lower.endsWith(".svg")) {
-            return "image/svg+xml";
+            String detected = "image/svg+xml";
+            String existing = mimeTypeCache.putIfAbsent(file, detected);
+            return existing == null ? detected : existing;
         }
         return null;
     }

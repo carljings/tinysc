@@ -4,9 +4,12 @@ import io.netty.bootstrap.ServerBootstrap;
 import io.netty.buffer.Unpooled;
 import io.netty.channel.Channel;
 import io.netty.channel.ChannelFuture;
+import io.netty.channel.ChannelHandler;
 import io.netty.channel.ChannelHandlerContext;
 import io.netty.channel.ChannelInitializer;
 import io.netty.channel.ChannelOption;
+import io.netty.channel.ChannelOutboundHandlerAdapter;
+import io.netty.channel.ChannelPromise;
 import io.netty.channel.EventLoopGroup;
 import io.netty.channel.MultiThreadIoEventLoopGroup;
 import io.netty.channel.SimpleChannelInboundHandler;
@@ -21,11 +24,11 @@ import io.netty.handler.codec.http.HttpDecoderConfig;
 import io.netty.handler.codec.http.HttpHeaderNames;
 import io.netty.handler.codec.http.HttpHeaderValues;
 import io.netty.handler.codec.http.HttpObjectAggregator;
+import io.netty.handler.codec.http.HttpResponse;
 import io.netty.handler.codec.http.HttpResponseStatus;
 import io.netty.handler.codec.http.HttpServerCodec;
 import io.netty.handler.codec.http.HttpUtil;
 import io.netty.handler.flow.FlowControlHandler;
-import io.netty.handler.timeout.ReadTimeoutHandler;
 import io.netty.util.CharsetUtil;
 import io.tinysc.kernel.ContainerExchange;
 import io.tinysc.kernel.ContainerRequest;
@@ -34,10 +37,15 @@ import io.tinysc.kernel.NamedThreadFactory;
 import io.tinysc.kernel.ServerConfig;
 import io.tinysc.kernel.WebAppRuntime;
 
+import java.io.IOException;
 import java.net.InetSocketAddress;
+import java.nio.ByteBuffer;
 import java.nio.charset.StandardCharsets;
 import java.time.Duration;
-import java.util.List;
+import java.time.Instant;
+import java.time.ZoneOffset;
+import java.time.format.DateTimeFormatter;
+import java.util.Locale;
 import java.util.Map;
 import java.util.concurrent.RejectedExecutionException;
 import java.util.concurrent.ThreadPoolExecutor;
@@ -49,16 +57,25 @@ import java.util.logging.Logger;
 
 public final class NettyHttpConnector implements AutoCloseable {
     private static final Logger LOGGER = Logger.getLogger(NettyHttpConnector.class.getName());
+    private static final DateTimeFormatter HTTP_DATE_FORMATTER = DateTimeFormatter
+            .ofPattern("EEE, dd MMM uuuu HH:mm:ss 'GMT'", Locale.US)
+            .withZone(ZoneOffset.UTC);
+    private static final HttpDateCache HTTP_DATE_CACHE = new HttpDateCache();
+    private static final DateHeaderHandler DATE_HEADER_HANDLER = new DateHeaderHandler();
 
     private final ServerConfig config;
     private final WebAppRuntime runtime;
     private final AtomicBoolean started = new AtomicBoolean();
     private final AtomicBoolean accepting = new AtomicBoolean();
     private final AtomicLong rejectedRequests = new AtomicLong();
+    private final AtomicLong requestBodyTimeouts = new AtomicLong();
+    private final AtomicLong responseWriteTimeouts = new AtomicLong();
     private EventLoopGroup acceptorGroup;
     private EventLoopGroup ioGroup;
     private BoundedElasticExecutor applicationExecutor;
     private RequestAdmissionController admissionController;
+    private RawIngressController rawIngressController;
+    private AccessLog accessLog;
     private Channel serverChannel;
 
     public NettyHttpConnector(ServerConfig config, WebAppRuntime runtime) {
@@ -69,25 +86,31 @@ public final class NettyHttpConnector implements AutoCloseable {
         this.runtime = runtime;
     }
 
-    public synchronized int start() throws InterruptedException {
+    public synchronized int start() throws IOException, InterruptedException {
         if (!started.compareAndSet(false, true)) {
             throw new IllegalStateException("connector is already started");
         }
-        acceptorGroup = new MultiThreadIoEventLoopGroup(
-                1, new NamedThreadFactory("tinysc-acceptor-", false), NioIoHandler.newFactory());
-        ioGroup = new MultiThreadIoEventLoopGroup(
-                config.ioThreads(),
-                new NamedThreadFactory("tinysc-io-", false), NioIoHandler.newFactory());
-        rejectedRequests.set(0L);
-        admissionController = new RequestAdmissionController(
-                config.maxConnections(), config.maxInflightRequests(),
-                config.maxInflightRequestBytes());
-        accepting.set(true);
-        applicationExecutor = new BoundedElasticExecutor(
-                config.workerMinThreads(), config.workerThreads(),
-                config.workerIdleTimeoutMillis(), config.workerQueueCapacity(),
-                new NamedThreadFactory("tinysc-worker-", false));
         try {
+            accessLog = config.accessLogEnabled() ? AccessLog.open(config.baseDirectory()) : null;
+            final AccessLog pipelineAccessLog = accessLog;
+            acceptorGroup = new MultiThreadIoEventLoopGroup(
+                    1, new NamedThreadFactory("tinysc-acceptor-", false),
+                    NioIoHandler.newFactory());
+            ioGroup = new MultiThreadIoEventLoopGroup(
+                    config.ioThreads(),
+                    new NamedThreadFactory("tinysc-io-", false), NioIoHandler.newFactory());
+            rejectedRequests.set(0L);
+            requestBodyTimeouts.set(0L);
+            responseWriteTimeouts.set(0L);
+            admissionController = new RequestAdmissionController(
+                    config.maxConnections(), config.maxInflightRequests(),
+                    config.maxInflightRequestBytes());
+            rawIngressController = new RawIngressController(config.maxRawIngressBytes());
+            accepting.set(true);
+            applicationExecutor = new BoundedElasticExecutor(
+                    config.workerMinThreads(), config.workerThreads(),
+                    config.workerIdleTimeoutMillis(), config.workerQueueCapacity(),
+                    new NamedThreadFactory("tinysc-worker-", false));
             HttpDecoderConfig decoderConfig = new HttpDecoderConfig()
                     .setMaxInitialLineLength(config.maxInitialLineLength())
                     .setMaxHeaderSize(config.maxHeaderSize())
@@ -104,18 +127,38 @@ public final class NettyHttpConnector implements AutoCloseable {
                     .childHandler(new ChannelInitializer<SocketChannel>() {
                         @Override
                         protected void initChannel(SocketChannel channel) {
-                            channel.pipeline().addLast("read-timeout", new ReadTimeoutHandler(
-                                    config.requestReadTimeoutMillis(), TimeUnit.MILLISECONDS));
+                            channel.pipeline().addLast("read-timeout",
+                                    new PausableReadTimeoutHandler(
+                                            config.requestReadTimeoutMillis(),
+                                            TimeUnit.MILLISECONDS));
                             channel.pipeline().addLast("http-codec", new HttpServerCodec(decoderConfig));
+                            channel.pipeline().addLast("date-header", DATE_HEADER_HANDLER);
+                            if (pipelineAccessLog != null) {
+                                channel.pipeline().addLast("access-log",
+                                        new AccessLogHandler(pipelineAccessLog));
+                            }
+                            channel.pipeline().addLast("write-timeout",
+                                    new ResponseWriteTimeoutHandler(
+                                            config.responseWriteTimeoutMillis(),
+                                            responseWriteTimeouts));
+                            RawIngressAdmission rawIngress = new RawIngressAdmission(
+                                    rawIngressController, config.maxRequestBodySize(),
+                                    config.requestBodyTimeoutMillis(), requestBodyTimeouts);
+                            channel.pipeline().addLast("raw-ingress", rawIngress);
                             channel.pipeline().addLast("http-aggregate",
                                     new HttpObjectAggregator(config.maxRequestBodySize(), true));
                             channel.pipeline().addLast("flow-control", new FlowControlHandler());
-                            channel.pipeline().addLast("request", new RequestHandler());
+                            channel.pipeline().addLast("raw-ingress-release",
+                                    rawIngress.releaseHandler());
+                            channel.pipeline().addLast("request", new RequestHandler(rawIngress));
                         }
                     });
             ChannelFuture bound = bootstrap.bind(config.bindAddress(), config.port()).sync();
             serverChannel = bound.channel();
             return boundPort();
+        } catch (IOException exception) {
+            stopAfterFailedStart();
+            throw exception;
         } catch (RuntimeException exception) {
             stopAfterFailedStart();
             throw exception;
@@ -191,6 +234,29 @@ public final class NettyHttpConnector implements AutoCloseable {
         return controller == null ? 0L : controller.rejectedRequestBytes();
     }
 
+    long rawIngressReservationCount() {
+        RawIngressController controller = rawIngressController;
+        return controller == null ? 0L : controller.activeReservations();
+    }
+
+    long rawIngressByteCount() {
+        RawIngressController controller = rawIngressController;
+        return controller == null ? 0L : controller.reservedBytes();
+    }
+
+    long rejectedRawIngressCount() {
+        RawIngressController controller = rawIngressController;
+        return controller == null ? 0L : controller.rejectedReservations();
+    }
+
+    long requestBodyTimeoutCount() {
+        return requestBodyTimeouts.get();
+    }
+
+    long responseWriteTimeoutCount() {
+        return responseWriteTimeouts.get();
+    }
+
     @Override
     public synchronized void close() {
         if (!started.getAndSet(false)) {
@@ -210,6 +276,8 @@ public final class NettyHttpConnector implements AutoCloseable {
         shutdownEventLoop(acceptorGroup, graceMillis);
         acceptorGroup = null;
         admissionController = null;
+        rawIngressController = null;
+        closeAccessLog();
     }
 
     private void stopAfterFailedStart() {
@@ -226,6 +294,16 @@ public final class NettyHttpConnector implements AutoCloseable {
         shutdownEventLoop(acceptorGroup, 0L);
         acceptorGroup = null;
         admissionController = null;
+        rawIngressController = null;
+        closeAccessLog();
+    }
+
+    private void closeAccessLog() {
+        AccessLog current = accessLog;
+        accessLog = null;
+        if (current != null) {
+            current.close();
+        }
     }
 
     private void awaitInflightRequests(long graceMillis) {
@@ -268,7 +346,12 @@ public final class NettyHttpConnector implements AutoCloseable {
 
     private final class RequestHandler extends SimpleChannelInboundHandler<FullHttpRequest> {
         private final StrictRequestValidator validator = new StrictRequestValidator();
+        private final RawIngressAdmission rawIngress;
         private RequestAdmissionController.ConnectionLease connectionLease;
+
+        private RequestHandler(RawIngressAdmission rawIngress) {
+            this.rawIngress = rawIngress;
+        }
 
         @Override
         public void channelActive(ChannelHandlerContext context) throws Exception {
@@ -328,7 +411,8 @@ public final class NettyHttpConnector implements AutoCloseable {
                         request.protocolVersion();
                 try {
                     applicationExecutor.execute(() -> service(
-                            context, protocolVersion, containerRequest, keepAlive, requestLease));
+                            context, protocolVersion, containerRequest, keepAlive, requestLease,
+                            rawIngress));
                 } catch (RejectedExecutionException rejected) {
                     requestLease.close();
                     recordRejectedRequest();
@@ -343,6 +427,10 @@ public final class NettyHttpConnector implements AutoCloseable {
 
         @Override
         public void exceptionCaught(ChannelHandlerContext context, Throwable cause) {
+            if (!context.channel().config().isAutoRead()) {
+                rawIngress.deferCloseAfterCurrentResponse();
+                return;
+            }
             if (cause instanceof TooLongFrameException) {
                 writeText(context, io.netty.handler.codec.http.HttpVersion.HTTP_1_1,
                         HttpResponseStatus.REQUEST_ENTITY_TOO_LARGE,
@@ -356,7 +444,10 @@ public final class NettyHttpConnector implements AutoCloseable {
     private static void pauseReads(ChannelHandlerContext context) {
         context.channel().config().setAutoRead(false);
         if (context.pipeline().context("read-timeout") != null) {
-            context.pipeline().remove("read-timeout");
+            ChannelHandlerContext timeoutContext = context.pipeline().context("read-timeout");
+            if (timeoutContext.handler() instanceof PausableReadTimeoutHandler) {
+                ((PausableReadTimeoutHandler) timeoutContext.handler()).suspendTimeout();
+            }
         }
     }
 
@@ -364,12 +455,13 @@ public final class NettyHttpConnector implements AutoCloseable {
         if (!context.channel().isActive()) {
             return;
         }
-        if (context.pipeline().context("read-timeout") == null) {
-            context.pipeline().addFirst("read-timeout", new ReadTimeoutHandler(
-                    config.requestReadTimeoutMillis(), TimeUnit.MILLISECONDS));
+        if (context.pipeline().context("read-timeout") != null) {
+            ChannelHandlerContext timeoutContext = context.pipeline().context("read-timeout");
+            if (timeoutContext.handler() instanceof PausableReadTimeoutHandler) {
+                ((PausableReadTimeoutHandler) timeoutContext.handler()).resumeTimeout();
+            }
         }
         context.channel().config().setAutoRead(true);
-        context.read();
     }
 
     private void recordRejectedRequest() {
@@ -409,13 +501,17 @@ public final class NettyHttpConnector implements AutoCloseable {
     private void service(ChannelHandlerContext context,
                          io.netty.handler.codec.http.HttpVersion protocolVersion,
                          ContainerRequest request, boolean keepAlive,
-                         RequestAdmissionController.RequestLease requestLease) {
+                         RequestAdmissionController.RequestLease requestLease,
+                         RawIngressAdmission rawIngress) {
         ContainerExchange exchange = new ContainerExchange(
                 request, new ContainerResponse(), applicationExecutor);
         try {
             runtime.service(exchange);
             if (!exchange.deferred()) {
                 exchange.complete();
+                finishRequestSafely(context, protocolVersion, request, exchange.response(),
+                        keepAlive, requestLease, rawIngress);
+                return;
             }
         } catch (Throwable failure) {
             if (failure instanceof VirtualMachineError) {
@@ -429,28 +525,44 @@ public final class NettyHttpConnector implements AutoCloseable {
             logApplicationFailure(request, failure);
             renderFailure(exchange.response());
             exchange.complete();
+            finishRequestSafely(context, protocolVersion, request, exchange.response(),
+                    keepAlive, requestLease, rawIngress);
+            return;
         }
         exchange.completion().whenComplete((ignored, failure) -> {
             if (failure != null) {
                 logApplicationFailure(request, failure);
                 renderFailure(exchange.response());
             }
-            try {
-                context.executor().execute(() -> finishRequest(
-                        context, protocolVersion, request, exchange.response(),
-                        keepAlive, requestLease));
-            } catch (RejectedExecutionException rejected) {
-                requestLease.close();
-                context.close();
-            }
+            finishRequest(context, protocolVersion, request, exchange.response(),
+                    keepAlive, requestLease, rawIngress);
         });
+    }
+
+    private void finishRequestSafely(ChannelHandlerContext context,
+                                     io.netty.handler.codec.http.HttpVersion protocolVersion,
+                                     ContainerRequest request, ContainerResponse response,
+                                     boolean keepAlive,
+                                     RequestAdmissionController.RequestLease requestLease,
+                                     RawIngressAdmission rawIngress) {
+        try {
+            finishRequest(context, protocolVersion, request, response,
+                    keepAlive, requestLease, rawIngress);
+        } catch (RuntimeException failure) {
+            requestLease.close();
+            context.close();
+            LOGGER.log(Level.SEVERE,
+                    "Response processing failed: " + request.method() + " " + request.path(),
+                    failure);
+        }
     }
 
     private void finishRequest(ChannelHandlerContext context,
                                io.netty.handler.codec.http.HttpVersion protocolVersion,
                                ContainerRequest request, ContainerResponse response,
                                boolean keepAlive,
-                               RequestAdmissionController.RequestLease requestLease) {
+                               RequestAdmissionController.RequestLease requestLease,
+                               RawIngressAdmission rawIngress) {
         final ChannelFuture writeFuture;
         try {
             writeFuture = writeResponse(
@@ -462,7 +574,8 @@ public final class NettyHttpConnector implements AutoCloseable {
         }
         writeFuture.addListener(completed -> {
             requestLease.close();
-            if (!completed.isSuccess() || !keepAlive || !accepting.get()) {
+            if (!completed.isSuccess() || !keepAlive || !accepting.get()
+                    || rawIngress.mustCloseAfterCurrentResponse()) {
                 context.close();
                 return;
             }
@@ -514,9 +627,12 @@ public final class NettyHttpConnector implements AutoCloseable {
         for (Map.Entry<String, String> header : request.headers()) {
             builder.addHeader(header.getKey(), header.getValue());
         }
-        byte[] body = new byte[request.content().readableBytes()];
-        request.content().getBytes(request.content().readerIndex(), body);
-        return builder.body(body).build();
+        int bodyLength = request.content().readableBytes();
+        if (bodyLength != 0) {
+            builder.bodyBuffers(request.content().nioBuffers(
+                    request.content().readerIndex(), bodyLength));
+        }
+        return builder.build();
     }
 
     private static Host parseHost(String value, InetSocketAddress fallback) {
@@ -555,18 +671,15 @@ public final class NettyHttpConnector implements AutoCloseable {
                                                io.netty.handler.codec.http.HttpVersion protocolVersion,
                                                String requestMethod, ContainerResponse source,
                                                boolean keepAlive) {
-        byte[] body = source.bodyBytes();
-        byte[] transmittedBody = "HEAD".equals(requestMethod) ? new byte[0] : body;
+        ByteBuffer body = source.bodyBuffer();
+        int bodyLength = body.remaining();
         HttpResponseStatus status = HttpResponseStatus.valueOf(source.status());
         FullHttpResponse response = new DefaultFullHttpResponse(
-                protocolVersion, status, Unpooled.wrappedBuffer(transmittedBody));
-        for (Map.Entry<String, List<String>> header : source.headers().entrySet()) {
-            for (String value : header.getValue()) {
-                response.headers().add(header.getKey(), value);
-            }
-        }
+                protocolVersion, status,
+                "HEAD".equals(requestMethod) ? Unpooled.EMPTY_BUFFER : Unpooled.wrappedBuffer(body));
+        source.forEachHeader((name, value) -> response.headers().add(name, value));
         if (!response.headers().contains(HttpHeaderNames.CONTENT_LENGTH)) {
-            response.headers().setInt(HttpHeaderNames.CONTENT_LENGTH, body.length);
+            response.headers().setInt(HttpHeaderNames.CONTENT_LENGTH, bodyLength);
         }
         if (keepAlive) {
             HttpUtil.setKeepAlive(response, true);
@@ -601,6 +714,41 @@ public final class NettyHttpConnector implements AutoCloseable {
         private Host(String name, int port) {
             this.name = name;
             this.port = port;
+        }
+    }
+
+    @ChannelHandler.Sharable
+    private static final class DateHeaderHandler extends ChannelOutboundHandlerAdapter {
+        @Override
+        public void write(ChannelHandlerContext context, Object message,
+                          ChannelPromise promise) throws Exception {
+            if (message instanceof HttpResponse) {
+                HttpResponse response = (HttpResponse) message;
+                if (!response.headers().contains(HttpHeaderNames.DATE)) {
+                    response.headers().set(HttpHeaderNames.DATE, HTTP_DATE_CACHE.current());
+                }
+            }
+            context.write(message, promise);
+        }
+    }
+
+    private static final class HttpDateCache {
+        private volatile long epochSecond = Long.MIN_VALUE;
+        private String value;
+
+        private String current() {
+            long currentSecond = System.currentTimeMillis() / 1000L;
+            long cachedSecond = epochSecond;
+            if (cachedSecond == currentSecond) {
+                return value;
+            }
+            synchronized (this) {
+                if (epochSecond != currentSecond) {
+                    value = HTTP_DATE_FORMATTER.format(Instant.ofEpochSecond(currentSecond));
+                    epochSecond = currentSecond;
+                }
+                return value;
+            }
         }
     }
 }

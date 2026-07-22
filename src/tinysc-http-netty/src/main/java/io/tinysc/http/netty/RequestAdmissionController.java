@@ -2,6 +2,7 @@ package io.tinysc.http.netty;
 
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLong;
 
 final class RequestAdmissionController {
@@ -14,6 +15,7 @@ final class RequestAdmissionController {
     private final AtomicLong rejectedConnections = new AtomicLong();
     private final AtomicLong rejectedRequests = new AtomicLong();
     private final AtomicLong rejectedRequestBytes = new AtomicLong();
+    private final AtomicInteger requestWaiters = new AtomicInteger();
     private final Object requestMonitor = new Object();
 
     RequestAdmissionController(long maxConnections, long maxRequests, long maxRequestBytes) {
@@ -41,9 +43,9 @@ final class RequestAdmissionController {
             rejectedRequests.incrementAndGet();
             return null;
         }
-        if (!tryAdd(activeRequestBytes, requestBytes, maxRequestBytes)) {
-            activeRequests.decrementAndGet();
-            signalRequestChange();
+        if (requestBytes != 0L
+                && !tryAdd(activeRequestBytes, requestBytes, maxRequestBytes)) {
+            releaseRequestCount();
             rejectedRequestBytes.incrementAndGet();
             return null;
         }
@@ -51,19 +53,27 @@ final class RequestAdmissionController {
     }
 
     boolean awaitNoRequests(long timeoutMillis) throws InterruptedException {
+        if (activeRequests.get() == 0L) {
+            return true;
+        }
         long remainingNanos = TimeUnit.MILLISECONDS.toNanos(Math.max(0L, timeoutMillis));
         long deadline = System.nanoTime() + remainingNanos;
         synchronized (requestMonitor) {
-            while (activeRequests.get() > 0L) {
-                if (remainingNanos <= 0L) {
-                    return false;
+            requestWaiters.incrementAndGet();
+            try {
+                while (activeRequests.get() > 0L) {
+                    if (remainingNanos <= 0L) {
+                        return false;
+                    }
+                    long millis = TimeUnit.NANOSECONDS.toMillis(remainingNanos);
+                    int nanos = (int) (remainingNanos - TimeUnit.MILLISECONDS.toNanos(millis));
+                    requestMonitor.wait(millis, nanos);
+                    remainingNanos = deadline - System.nanoTime();
                 }
-                long millis = TimeUnit.NANOSECONDS.toMillis(remainingNanos);
-                int nanos = (int) (remainingNanos - TimeUnit.MILLISECONDS.toNanos(millis));
-                requestMonitor.wait(millis, nanos);
-                remainingNanos = deadline - System.nanoTime();
+                return true;
+            } finally {
+                requestWaiters.decrementAndGet();
             }
-            return true;
         }
     }
 
@@ -91,17 +101,29 @@ final class RequestAdmissionController {
         return rejectedRequestBytes.get();
     }
 
+    int requestWaiters() {
+        return requestWaiters.get();
+    }
+
     private void releaseConnection() {
         activeConnections.decrementAndGet();
     }
 
     private void releaseRequest(long requestBytes) {
-        activeRequestBytes.addAndGet(-requestBytes);
-        activeRequests.decrementAndGet();
-        signalRequestChange();
+        if (requestBytes != 0L) {
+            activeRequestBytes.addAndGet(-requestBytes);
+        }
+        releaseRequestCount();
     }
 
-    private void signalRequestChange() {
+    private void releaseRequestCount() {
+        long remaining = activeRequests.decrementAndGet();
+        if (remaining == 0L && requestWaiters.get() > 0) {
+            signalNoRequests();
+        }
+    }
+
+    private void signalNoRequests() {
         synchronized (requestMonitor) {
             requestMonitor.notifyAll();
         }

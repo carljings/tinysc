@@ -17,21 +17,19 @@ final class ServletMapper {
     }
 
     ServletMappingResult map(String path) {
-        Entry exact = null;
         Entry longestPath = null;
         Entry extension = null;
         Entry defaultEntry = null;
         for (Entry entry : entries) {
             String pattern = entry.pattern;
-            if (pattern.equals(path) || (pattern.isEmpty() && "/".equals(path))) {
-                exact = entry;
-                break;
+            if (entry.exactResult != null && entry.matchesExact(path)) {
+                return entry.exactResult;
             }
-            if (isPathPattern(pattern) && pathMatches(pattern, path)) {
+            if (entry.pathPrefix != null && pathMatches(pattern, path)) {
                 if (longestPath == null || pattern.length() > longestPath.pattern.length()) {
                     longestPath = entry;
                 }
-            } else if (isExtensionPattern(pattern) && extensionMatches(pattern, path)) {
+            } else if (entry.extensionPattern && extensionMatches(pattern, path)) {
                 if (extension == null) {
                     extension = entry;
                 }
@@ -39,13 +37,10 @@ final class ServletMapper {
                 defaultEntry = entry;
             }
         }
-        if (exact != null) {
-            return new ServletMappingResult(exact.servletName, exact.pattern,
-                    exact.pattern.isEmpty() ? "" : path, null);
-        }
         if (longestPath != null) {
-            String matched = longestPath.pattern.substring(0, longestPath.pattern.length() - 2);
-            String pathInfo = path.length() == matched.length() ? null : path.substring(matched.length());
+            String matched = longestPath.pathPrefix;
+            String pathInfo = path.length() == matched.length()
+                    ? null : path.substring(matched.length());
             return new ServletMappingResult(longestPath.servletName, longestPath.pattern,
                     matched, pathInfo);
         }
@@ -53,7 +48,8 @@ final class ServletMapper {
             return new ServletMappingResult(extension.servletName, extension.pattern, path, null);
         }
         if (defaultEntry != null) {
-            return new ServletMappingResult(defaultEntry.servletName, defaultEntry.pattern, path, null);
+            return new ServletMappingResult(
+                    defaultEntry.servletName, defaultEntry.pattern, path, null);
         }
         return null;
     }
@@ -69,14 +65,25 @@ final class ServletMapper {
     }
 
     private static boolean pathMatches(String pattern, String path) {
-        String prefix = pattern.substring(0, pattern.length() - 2);
-        return prefix.isEmpty() || path.equals(prefix) || path.startsWith(prefix + "/");
+        int prefixLength = pattern.length() - 2;
+        if (prefixLength == 0) {
+            return true;
+        }
+        int pathLength = path.length();
+        if (pathLength < prefixLength
+                || !path.regionMatches(0, pattern, 0, prefixLength)) {
+            return false;
+        }
+        return pathLength == prefixLength || path.charAt(prefixLength) == '/';
     }
 
     private static boolean extensionMatches(String pattern, String path) {
         int slash = path.lastIndexOf('/');
         int dot = path.lastIndexOf('.');
-        return dot > slash && path.substring(dot + 1).equals(pattern.substring(2));
+        int extensionLength = pattern.length() - 2;
+        return dot > slash
+                && path.length() == dot + 1 + extensionLength
+                && path.regionMatches(dot + 1, pattern, 2, extensionLength);
     }
 
     private static boolean isPathPattern(String pattern) {
@@ -100,10 +107,25 @@ final class ServletMapper {
     private static final class Entry {
         private final String servletName;
         private final String pattern;
+        private final String pathPrefix;
+        private final boolean extensionPattern;
+        private final ServletMappingResult exactResult;
 
         private Entry(String servletName, String pattern) {
             this.servletName = servletName;
             this.pattern = pattern;
+            boolean pathPattern = isPathPattern(pattern);
+            extensionPattern = isExtensionPattern(pattern);
+            pathPrefix = pathPattern
+                    ? pattern.substring(0, pattern.length() - 2) : null;
+            exactResult = !pathPattern && !extensionPattern && !"/".equals(pattern)
+                    ? new ServletMappingResult(servletName, pattern,
+                    pattern.isEmpty() ? "" : pattern, null) : null;
         }
+
+        private boolean matchesExact(String path) {
+            return pattern.equals(path) || (pattern.isEmpty() && "/".equals(path));
+        }
+
     }
 }

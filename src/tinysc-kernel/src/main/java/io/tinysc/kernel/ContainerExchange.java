@@ -3,14 +3,19 @@ package io.tinysc.kernel;
 import java.util.Objects;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.Executor;
-import java.util.concurrent.atomic.AtomicBoolean;
 
 public final class ContainerExchange {
+    private static final int COMPLETION_PENDING = 0;
+    private static final int COMPLETION_SUCCEEDED = 1;
+    private static final int COMPLETION_FAILED = 2;
+
     private final ContainerRequest request;
     private final ContainerResponse response;
     private final Executor asyncExecutor;
-    private final AtomicBoolean deferred = new AtomicBoolean();
-    private final CompletableFuture<Void> completion = new CompletableFuture<Void>();
+    private volatile boolean deferred;
+    private int completionState = COMPLETION_PENDING;
+    private Throwable completionFailure;
+    private CompletableFuture<Void> completion;
 
     public ContainerExchange(ContainerRequest request) {
         this(request, new ContainerResponse(), new Executor() {
@@ -46,11 +51,11 @@ public final class ContainerExchange {
     }
 
     public void defer() {
-        deferred.set(true);
+        deferred = true;
     }
 
     public boolean deferred() {
-        return deferred.get();
+        return deferred;
     }
 
     public void executeAsync(Runnable task) {
@@ -58,14 +63,52 @@ public final class ContainerExchange {
     }
 
     public CompletableFuture<Void> completion() {
-        return completion;
+        CompletableFuture<Void> current;
+        int state;
+        Throwable failure;
+        synchronized (this) {
+            if (completion == null) {
+                completion = new CompletableFuture<Void>();
+            }
+            current = completion;
+            state = completionState;
+            failure = completionFailure;
+        }
+        if (state == COMPLETION_SUCCEEDED) {
+            current.complete(null);
+        } else if (state == COMPLETION_FAILED) {
+            current.completeExceptionally(failure);
+        }
+        return current;
     }
 
     public void complete() {
-        completion.complete(null);
+        CompletableFuture<Void> current;
+        synchronized (this) {
+            if (completionState != COMPLETION_PENDING) {
+                return;
+            }
+            completionState = COMPLETION_SUCCEEDED;
+            current = completion;
+        }
+        if (current != null) {
+            current.complete(null);
+        }
     }
 
     public void fail(Throwable failure) {
-        completion.completeExceptionally(failure);
+        Objects.requireNonNull(failure, "failure");
+        CompletableFuture<Void> current;
+        synchronized (this) {
+            if (completionState != COMPLETION_PENDING) {
+                return;
+            }
+            completionState = COMPLETION_FAILED;
+            completionFailure = failure;
+            current = completion;
+        }
+        if (current != null) {
+            current.completeExceptionally(failure);
+        }
     }
 }
