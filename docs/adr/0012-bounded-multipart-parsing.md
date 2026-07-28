@@ -16,9 +16,12 @@ Servlet 调用前完整聚合请求体，因此本轮不能把基础 multipart �
   或 multipart 实现。
 - 选择 1.6.0 是因为它保持 Java 8 基线，并包含可配置单 Part Header 上限的安全修复；Commons IO
   统一使用工程现有的 `2.20.0`。
-- 支持 `web.xml` 的 `<multipart-config>` 和
-  `ServletRegistration.Dynamic#setMultipartConfig`。本轮不单独特判 `@MultipartConfig`；
-  它随完整注解声明与 `metadata-complete` 合并规则一并实现。
+- 支持 `web.xml` 的 `<multipart-config>`、`ServletRegistration.Dynamic#setMultipartConfig`
+  和已注册 Servlet 的 `@MultipartConfig` 缺省回退。XML/SCI 显式配置整体优先，不逐字段拼接；
+  注解不负责发现或映射 Servlet。
+- 注解在首次映射请求时由 Servlet holder 懒解析并缓存，不增加全 WAR 扫描和冷启动工作。
+- `metadata-complete=true` 时仍匹配 Tomcat 8.5.100 的运行时注解回退；该兼容取舍见
+  [ADR-0014](0014-tomcat-compatible-multipart-annotation.md)。
 - `maxRequestSize`、`maxFileSize` 和 `fileSizeThreshold` 必须生效；超过前两项时抛出
   `IllegalStateException`。
 - 每个请求最多解析 50 个 Part，每个 Part Header 最多 512 bytes。解析器直接读取
@@ -37,6 +40,7 @@ Servlet 调用前完整聚合请求体，因此本轮不能把基础 multipart �
 - 请求、单文件、Part 数量和 Part Header 超限均有确定失败类型。
 - `fileSizeThreshold`、`write`、`delete`、路径逃逸拒绝和请求结束清理通过。
 - Probe WAR 经真实 HTTP 上传通过；同一 Probe WAR 与 Tomcat 8 的状态码、核心响应和限额结果完成差分。
+- XML 显式配置覆盖冲突注解、SCI 显式配置覆盖冲突注解，以及 annotation-only 成功/超限均有回归。
 - Java 8 完整 reactor、class major 与 namespace 门禁继续通过。
 
 ## 后果
@@ -51,7 +55,7 @@ Servlet 调用前完整聚合请求体，因此本轮不能把基础 multipart �
 
 - shaded 制品新增 Commons FileUpload 依赖，已纳入第三方许可证清单；正式发布前仍必须生成 SBOM。
 - 请求体在传输层仍会先完整聚合；阈值落盘只能减少解析后的额外常驻内存，不能消除入站聚合内存。
-- `@MultipartConfig`、真正流式上传、非阻塞读取和真实 Legacy WAR 上传验收仍未完成。
+- 全 WAR 注解发现、真正流式上传、非阻塞读取和真实 Legacy WAR 上传验收仍未完成。
 
 ## 备选方案
 

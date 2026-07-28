@@ -22,6 +22,7 @@ import javax.servlet.ServletRequest;
 import javax.servlet.ServletRequestEvent;
 import javax.servlet.ServletRequestListener;
 import javax.servlet.ServletResponse;
+import javax.servlet.annotation.MultipartConfig;
 import javax.servlet.http.HttpServlet;
 import javax.servlet.http.HttpServletRequest;
 import javax.servlet.http.HttpServletResponse;
@@ -329,12 +330,12 @@ class JavaxServletRuntimeTest {
 
             ContainerExchange exchange = multipartExchange("/upload", "tiny-boundary",
                     "title", "monthly",
-                    "document", "plan.txt", "text/plain", "content");
+                    "document", "plan.txt", "text/plain", "123456789");
             fixture.runtime.service(exchange);
 
             assertEquals(200, exchange.response().status());
             assertEquals("title=monthly;titles=[monthly, monthly-again];"
-                            + "file=plan.txt;size=7",
+                            + "file=plan.txt;size=9",
                     new String(exchange.response().bodyBytes(), StandardCharsets.UTF_8));
             assertTrue(uploadedPart.get() != null);
             assertEquals(0L, fileCount(servletTempDirectory(fixture.runtime)));
@@ -344,6 +345,41 @@ class JavaxServletRuntimeTest {
                     uploadedPart.get().getInputStream();
                 }
             });
+        }
+    }
+
+    @Test
+    void appliesMultipartConfigAnnotationWhenNoExplicitConfigExists() throws Exception {
+        AtomicReference<Part> uploadedPart = new AtomicReference<Part>();
+        try (RuntimeFixture fixture = RuntimeFixture.open(temporaryDirectory)) {
+            ServletRegistration.Dynamic servlet = fixture.runtime.addServlet(
+                    "annotated-upload", new MultipartServlet(uploadedPart));
+            assertTrue(servlet.addMapping("/annotated-upload").isEmpty());
+            fixture.start();
+
+            ContainerExchange accepted = multipartExchange(
+                    "/annotated-upload", "annotation-boundary",
+                    "title", "m",
+                    "document", "small.txt", "text/plain", "abc");
+            fixture.runtime.service(accepted);
+
+            assertEquals(200, accepted.response().status());
+            assertEquals("title=m;titles=[m, m-again];"
+                            + "file=small.txt;size=3",
+                    new String(accepted.response().bodyBytes(), StandardCharsets.UTF_8));
+
+            ContainerExchange rejected = multipartExchange(
+                    "/annotated-upload", "annotation-limit-boundary",
+                    "title", "m",
+                    "document", "large.txt", "text/plain", "123456789");
+            IllegalStateException failure = assertThrows(
+                    IllegalStateException.class, new Executable() {
+                        @Override
+                        public void execute() throws Throwable {
+                            fixture.runtime.service(rejected);
+                        }
+                    });
+            assertTrue(failure.getMessage().contains("size limit exceeded"));
         }
     }
 
@@ -555,6 +591,7 @@ class JavaxServletRuntimeTest {
         }
     }
 
+    @MultipartConfig(maxFileSize = 8L, maxRequestSize = 1024L, fileSizeThreshold = 0)
     private static final class MultipartServlet extends HttpServlet {
         private final AtomicReference<Part> uploadedPart;
 
