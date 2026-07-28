@@ -10,12 +10,24 @@
 
 Java 21 虚拟线程仅作为 2.x 可选执行器，不提高最低运行版本。
 
-## 2026-07-21 当前进度
+## 2026-07-22 当前进度
 
 - alpha 的 HTTP → Filter → Servlet 与真实 Probe WAR 门禁已通过。
 - WAR 安全展开、web.xml、SCI、Listener、Session、类加载、Async 基础和 forward 已提前落地，
   但 beta 兼容面尚未完整。
-- 两个内部 Legacy WAR 均通过 L0，进入 Spring 初始化后受外部数据库读超时阻塞，未达到 L1/L2。
+- 两个内部 Legacy WAR 均通过 L0；Legacy WAR B 已达到关键路径 L2，完成登录、列表、申报、
+  `page_load` 和静态模板 POST 的 Tomcat 差分，并在目标环境实际演练失败回滚后完成受控切换；
+  上传、错误页和完整管理流程仍未覆盖。Legacy WAR A 仍受数据库超时影响。
 - 首轮 Tomcat 8.5.100 对照中启动目标通过，RSS 与 p99 目标未通过。
-- 下一退出条件优先是可达业务依赖下的 L1/L2、multipart/async dispatch/web-fragment，以及
-  30 秒以上独立压测端复测。
+- worker 已改为有界弹性池，默认 `--min-workers` 从 8 下调到 2，以减少首波创建；并验证繁忙扩容、
+  容量外 `503`、过载恢复和空闲回落。该 smoke 只证明状态正确，不构成与 Tomcat 的新性能对比。
+- 独立 HTTP access log 已落地，CLI 默认开启，`--access-log false` 可关闭；日志写入
+  `<base>/logs/access.log`，使用独立有界队列和单线程 writer，并在关闭时 drain / flush。
+- Jetty、Undertow、Tomcat 与 Netty 的资源控制设计已完成对照；连接、在途请求、在途字节预算、原始入站预算
+  和 `--request-read-timeout` / `--request-body-timeout` / `--response-write-timeout` 已落地，其中
+  `maxRawIngressBytes` 现在按实际到达字节增量占用，`Content-Length` 只做单请求上限早期 `413`，断开、
+  超时或失败会精确释放；停止时会等待所有已接纳但仍在途的请求，包括 deferred exchange。
+- 当前 response 仍全量堆缓冲，真正的流式响应写、非阻塞 `WriteListener` 和每连接 raw ingress 公平份额
+  仍在后续阶段。
+- 下一退出条件优先是 Legacy WAR A 在可达业务依赖下的 L1/L2、Legacy WAR B 剩余关键流程、
+  multipart/async dispatch/web-fragment、真正流式响应写，以及 1 小时/24 小时长稳和独立压测端复测。

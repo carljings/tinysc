@@ -44,9 +44,10 @@ public final class WarDeploymentManager {
         try {
             WebAppDescriptor descriptor = parser.parseWebRoot(webRoot);
             classLoader = WebAppClassLoader.create(webRoot, parent);
+            WebAppResources resources = WebAppResources.create(webRoot);
             long elapsedMillis = (System.nanoTime() - started) / 1_000_000L;
             return new PreparedWebApp(normalizedSource, webRoot, sha256, cacheHit,
-                    elapsedMillis, descriptor, classLoader);
+                    elapsedMillis, descriptor, classLoader, resources);
         } catch (DeploymentException exception) {
             closeQuietly(classLoader, exception);
             throw exception;

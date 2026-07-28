@@ -10,11 +10,11 @@
     <filter>
         <filter-name>probeFilter</filter-name>
         <filter-class>example.tinysc.probe.ProbeFilter</filter-class>
+        <async-supported>true</async-supported>
     </filter>
     <filter-mapping>
         <filter-name>probeFilter</filter-name>
-        <url-pattern>/hello/*</url-pattern>
-        <url-pattern>/benchmark</url-pattern>
+        <url-pattern>/*</url-pattern>
         <dispatcher>REQUEST</dispatcher>
         <dispatcher>FORWARD</dispatcher>
     </filter-mapping>

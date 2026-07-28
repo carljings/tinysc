@@ -11,9 +11,19 @@ public final class ServerConfig {
     private final int maxInitialLineLength;
     private final int maxHeaderSize;
     private final int maxRequestBodySize;
+    private final int maxConnections;
+    private final long maxInflightRequests;
+    private final long maxInflightRequestBytes;
+    private final long maxRawIngressBytes;
+    private final long requestReadTimeoutMillis;
+    private final long requestBodyTimeoutMillis;
+    private final long responseWriteTimeoutMillis;
+    private final boolean accessLogEnabled;
     private final int ioThreads;
     private final int workerThreads;
+    private final int workerMinThreads;
     private final int workerQueueCapacity;
+    private final long workerIdleTimeoutMillis;
     private final long shutdownGraceMillis;
 
     private ServerConfig(Builder builder) {
@@ -27,9 +37,39 @@ public final class ServerConfig {
         maxInitialLineLength = requirePositive(builder.maxInitialLineLength, "maxInitialLineLength");
         maxHeaderSize = requirePositive(builder.maxHeaderSize, "maxHeaderSize");
         maxRequestBodySize = requirePositive(builder.maxRequestBodySize, "maxRequestBodySize");
+        maxConnections = requirePositive(builder.maxConnections, "maxConnections");
+        maxInflightRequestBytes = requirePositive(
+                builder.maxInflightRequestBytes, "maxInflightRequestBytes");
+        if (maxInflightRequestBytes < maxRequestBodySize) {
+            throw new IllegalArgumentException(
+                    "maxInflightRequestBytes must be at least maxRequestBodySize");
+        }
+        maxRawIngressBytes = requirePositive(
+                builder.maxRawIngressBytes, "maxRawIngressBytes");
+        if (maxRawIngressBytes < maxRequestBodySize) {
+            throw new IllegalArgumentException(
+                    "maxRawIngressBytes must be at least maxRequestBodySize");
+        }
+        requestReadTimeoutMillis = requirePositive(
+                builder.requestReadTimeoutMillis, "requestReadTimeoutMillis");
+        requestBodyTimeoutMillis = requirePositive(
+                builder.requestBodyTimeoutMillis, "requestBodyTimeoutMillis");
+        responseWriteTimeoutMillis = requirePositive(
+                builder.responseWriteTimeoutMillis, "responseWriteTimeoutMillis");
+        accessLogEnabled = builder.accessLogEnabled;
         ioThreads = requirePositive(builder.ioThreads, "ioThreads");
         workerThreads = requirePositive(builder.workerThreads, "workerThreads");
+        workerMinThreads = builder.workerMinThreads == null
+                ? Math.min(2, workerThreads) : builder.workerMinThreads.intValue();
+        if (workerMinThreads < 1 || workerMinThreads > workerThreads) {
+            throw new IllegalArgumentException("workerMinThreads must be between 1 and workerThreads");
+        }
         workerQueueCapacity = requirePositive(builder.workerQueueCapacity, "workerQueueCapacity");
+        maxInflightRequests = (long) workerThreads + workerQueueCapacity;
+        if (builder.workerIdleTimeoutMillis <= 0) {
+            throw new IllegalArgumentException("workerIdleTimeoutMillis must be positive");
+        }
+        workerIdleTimeoutMillis = builder.workerIdleTimeoutMillis;
         if (builder.shutdownGraceMillis < 0) {
             throw new IllegalArgumentException("shutdownGraceMillis must not be negative");
         }
@@ -64,6 +104,38 @@ public final class ServerConfig {
         return maxRequestBodySize;
     }
 
+    public int maxConnections() {
+        return maxConnections;
+    }
+
+    public long maxInflightRequests() {
+        return maxInflightRequests;
+    }
+
+    public long maxInflightRequestBytes() {
+        return maxInflightRequestBytes;
+    }
+
+    public long maxRawIngressBytes() {
+        return maxRawIngressBytes;
+    }
+
+    public long requestReadTimeoutMillis() {
+        return requestReadTimeoutMillis;
+    }
+
+    public long requestBodyTimeoutMillis() {
+        return requestBodyTimeoutMillis;
+    }
+
+    public long responseWriteTimeoutMillis() {
+        return responseWriteTimeoutMillis;
+    }
+
+    public boolean accessLogEnabled() {
+        return accessLogEnabled;
+    }
+
     public int ioThreads() {
         return ioThreads;
     }
@@ -72,8 +144,16 @@ public final class ServerConfig {
         return workerThreads;
     }
 
+    public int workerMinThreads() {
+        return workerMinThreads;
+    }
+
     public int workerQueueCapacity() {
         return workerQueueCapacity;
+    }
+
+    public long workerIdleTimeoutMillis() {
+        return workerIdleTimeoutMillis;
     }
 
     public long shutdownGraceMillis() {
@@ -119,10 +199,19 @@ public final class ServerConfig {
         private int maxInitialLineLength = 8192;
         private int maxHeaderSize = 16384;
         private int maxRequestBodySize = 16 * 1024 * 1024;
-        private int ioThreads = Math.max(1, Math.min(2,
+        private int maxConnections = 1024;
+        private long maxInflightRequestBytes = 64L * 1024L * 1024L;
+        private long maxRawIngressBytes = 64L * 1024L * 1024L;
+        private long requestReadTimeoutMillis = 30000L;
+        private long requestBodyTimeoutMillis = 300000L;
+        private long responseWriteTimeoutMillis = 30000L;
+        private boolean accessLogEnabled;
+        private int ioThreads = Math.max(1, Math.min(4,
                 Runtime.getRuntime().availableProcessors()));
         private int workerThreads = Math.max(4, Runtime.getRuntime().availableProcessors() * 2);
-        private int workerQueueCapacity = 1024;
+        private Integer workerMinThreads;
+        private int workerQueueCapacity = 100;
+        private long workerIdleTimeoutMillis = 60000L;
         private long shutdownGraceMillis = 30000L;
 
         private Builder() {
@@ -166,6 +255,41 @@ public final class ServerConfig {
             return this;
         }
 
+        public Builder maxConnections(int value) {
+            maxConnections = value;
+            return this;
+        }
+
+        public Builder maxInflightRequestBytes(long value) {
+            maxInflightRequestBytes = value;
+            return this;
+        }
+
+        public Builder maxRawIngressBytes(long value) {
+            maxRawIngressBytes = value;
+            return this;
+        }
+
+        public Builder requestReadTimeoutMillis(long value) {
+            requestReadTimeoutMillis = value;
+            return this;
+        }
+
+        public Builder requestBodyTimeoutMillis(long value) {
+            requestBodyTimeoutMillis = value;
+            return this;
+        }
+
+        public Builder responseWriteTimeoutMillis(long value) {
+            responseWriteTimeoutMillis = value;
+            return this;
+        }
+
+        public Builder accessLogEnabled(boolean value) {
+            accessLogEnabled = value;
+            return this;
+        }
+
         public Builder ioThreads(int value) {
             ioThreads = value;
             return this;
@@ -176,8 +300,18 @@ public final class ServerConfig {
             return this;
         }
 
+        public Builder workerMinThreads(int value) {
+            workerMinThreads = value;
+            return this;
+        }
+
         public Builder workerQueueCapacity(int value) {
             workerQueueCapacity = value;
+            return this;
+        }
+
+        public Builder workerIdleTimeoutMillis(long value) {
+            workerIdleTimeoutMillis = value;
             return this;
         }
 
@@ -189,5 +323,12 @@ public final class ServerConfig {
         public ServerConfig build() {
             return new ServerConfig(this);
         }
+    }
+
+    private static long requirePositive(long value, String field) {
+        if (value <= 0L) {
+            throw new IllegalArgumentException(field + " must be positive");
+        }
+        return value;
     }
 }

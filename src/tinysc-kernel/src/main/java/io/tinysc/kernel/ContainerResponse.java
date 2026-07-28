@@ -2,17 +2,20 @@ package io.tinysc.kernel;
 
 import java.io.ByteArrayOutputStream;
 import java.io.OutputStream;
+import java.nio.ByteBuffer;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.LinkedHashMap;
 import java.util.List;
-import java.util.Locale;
 import java.util.Map;
 
 public final class ContainerResponse {
+    private static final ByteBuffer EMPTY_BODY_BUFFER = ByteBuffer.allocate(0).asReadOnlyBuffer();
+
     private int status = 200;
-    private final Map<String, HeaderValues> headers = new LinkedHashMap<String, HeaderValues>();
-    private final ByteArrayOutputStream body = new ByteArrayOutputStream(1024);
+    private HeaderValues[] headers = new HeaderValues[8];
+    private int headerCount;
+    private final ResponseBody body = new ResponseBody(128);
     private boolean committed;
 
     public int status() {
@@ -30,39 +33,52 @@ public final class ContainerResponse {
     public void setHeader(String name, String value) {
         ensureNotCommitted();
         validateHeader(name, value);
-        HeaderValues header = new HeaderValues(name);
-        header.values.add(value);
-        headers.put(normalize(name), header);
+        int index = findHeaderIndex(name);
+        if (index >= 0) {
+            headers[index].set(name, value);
+            return;
+        }
+        ensureHeaderCapacity(headerCount + 1);
+        headers[headerCount++] = new HeaderValues(name, value);
     }
 
     public void addHeader(String name, String value) {
         ensureNotCommitted();
         validateHeader(name, value);
-        String normalized = normalize(name);
-        HeaderValues header = headers.get(normalized);
-        if (header == null) {
-            header = new HeaderValues(name);
-            headers.put(normalized, header);
+        int index = findHeaderIndex(name);
+        if (index >= 0) {
+            headers[index].add(value);
+            return;
         }
-        header.values.add(value);
+        ensureHeaderCapacity(headerCount + 1);
+        headers[headerCount++] = new HeaderValues(name, value);
     }
 
     public boolean containsHeader(String name) {
-        return headers.containsKey(normalize(name));
+        return findHeaderIndex(name) >= 0;
     }
 
     public String firstHeader(String name) {
-        HeaderValues header = headers.get(normalize(name));
-        return header == null || header.values.isEmpty() ? null : header.values.get(0);
+        int index = findHeaderIndex(name);
+        return index < 0 ? null : headers[index].firstValue();
     }
 
     public Map<String, List<String>> headers() {
         Map<String, List<String>> snapshot = new LinkedHashMap<String, List<String>>();
-        for (HeaderValues header : headers.values()) {
-            snapshot.put(header.originalName,
-                    Collections.unmodifiableList(new ArrayList<String>(header.values)));
+        for (int i = 0; i < headerCount; i++) {
+            HeaderValues header = headers[i];
+            snapshot.put(header.originalName, header.snapshotValues());
         }
         return Collections.unmodifiableMap(snapshot);
+    }
+
+    public void forEachHeader(HeaderConsumer consumer) {
+        if (consumer == null) {
+            throw new NullPointerException("consumer");
+        }
+        for (int i = 0; i < headerCount; i++) {
+            headers[i].forEach(consumer);
+        }
     }
 
     public OutputStream bodyStream() {
@@ -71,6 +87,10 @@ public final class ContainerResponse {
 
     public int bodySize() {
         return body.size();
+    }
+
+    public ByteBuffer bodyBuffer() {
+        return body.readOnlyBuffer();
     }
 
     public byte[] bodyBytes() {
@@ -85,7 +105,7 @@ public final class ContainerResponse {
     public void reset() {
         ensureNotCommitted();
         status = 200;
-        headers.clear();
+        clearHeaders();
         body.reset();
     }
 
@@ -103,15 +123,40 @@ public final class ContainerResponse {
         }
     }
 
-    private static String normalize(String name) {
+    private int findHeaderIndex(String name) {
+        validateHeaderName(name);
+        for (int i = 0; i < headerCount; i++) {
+            if (headers[i].matches(name)) {
+                return i;
+            }
+        }
+        return -1;
+    }
+
+    private void ensureHeaderCapacity(int capacity) {
+        if (capacity <= headers.length) {
+            return;
+        }
+        HeaderValues[] expanded = new HeaderValues[headers.length << 1];
+        System.arraycopy(headers, 0, expanded, 0, headerCount);
+        headers = expanded;
+    }
+
+    private void clearHeaders() {
+        for (int i = 0; i < headerCount; i++) {
+            headers[i] = null;
+        }
+        headerCount = 0;
+    }
+
+    private static void validateHeaderName(String name) {
         if (name == null || name.isEmpty()) {
             throw new IllegalArgumentException("header name must not be empty");
         }
-        return name.toLowerCase(Locale.ROOT);
     }
 
     private static void validateHeader(String name, String value) {
-        normalize(name);
+        validateHeaderName(name);
         if (value == null) {
             throw new IllegalArgumentException("header value must not be null");
         }
@@ -125,11 +170,74 @@ public final class ContainerResponse {
     }
 
     private static final class HeaderValues {
-        private final String originalName;
-        private final List<String> values = new ArrayList<String>();
+        private String originalName;
+        private String firstValue;
+        private List<String> otherValues;
 
-        private HeaderValues(String originalName) {
+        private HeaderValues(String originalName, String firstValue) {
             this.originalName = originalName;
+            this.firstValue = firstValue;
         }
+
+        private boolean matches(String name) {
+            return originalName.equalsIgnoreCase(name);
+        }
+
+        private void set(String name, String value) {
+            originalName = name;
+            firstValue = value;
+            if (otherValues != null) {
+                otherValues.clear();
+            }
+        }
+
+        private void add(String value) {
+            if (otherValues == null) {
+                otherValues = new ArrayList<String>(1);
+            }
+            otherValues.add(value);
+        }
+
+        private String firstValue() {
+            return firstValue;
+        }
+
+        private List<String> snapshotValues() {
+            if (otherValues == null || otherValues.isEmpty()) {
+                return Collections.singletonList(firstValue);
+            }
+            ArrayList<String> snapshot = new ArrayList<String>(1 + otherValues.size());
+            snapshot.add(firstValue);
+            snapshot.addAll(otherValues);
+            return Collections.unmodifiableList(snapshot);
+        }
+
+        private void forEach(HeaderConsumer consumer) {
+            consumer.accept(originalName, firstValue);
+            if (otherValues == null) {
+                return;
+            }
+            for (String value : otherValues) {
+                consumer.accept(originalName, value);
+            }
+        }
+    }
+
+    private static final class ResponseBody extends ByteArrayOutputStream {
+        private ResponseBody(int size) {
+            super(size);
+        }
+
+        private ByteBuffer readOnlyBuffer() {
+            if (count == 0) {
+                return EMPTY_BODY_BUFFER.duplicate();
+            }
+            return ByteBuffer.wrap(buf, 0, count).asReadOnlyBuffer();
+        }
+    }
+
+    @FunctionalInterface
+    public interface HeaderConsumer {
+        void accept(String name, String value);
     }
 }

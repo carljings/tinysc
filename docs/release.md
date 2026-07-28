@@ -29,6 +29,7 @@ tinysc:2-jdk17
 ## 发布检查表
 
 - [ ] 完整 Maven reactor 通过。
+- [ ] GitHub Actions 的 Java 8 `clean verify` 门禁通过。
 - [ ] 真实 JDK 8 测试通过，class major ≤ 52。
 - [ ] kernel 不含 Servlet namespace。
 - [ ] Probe WAR 契约测试通过。

@@ -28,6 +28,8 @@ import javax.servlet.ServletRequestEvent;
 import javax.servlet.ServletRequestListener;
 import javax.servlet.ServletResponse;
 import javax.servlet.ServletSecurityElement;
+import javax.servlet.http.HttpServlet;
+import javax.servlet.http.HttpServletRequest;
 import javax.servlet.http.HttpServletResponse;
 import javax.servlet.http.HttpSessionAttributeListener;
 import javax.servlet.http.HttpSessionBindingEvent;
@@ -36,8 +38,13 @@ import javax.servlet.http.HttpSessionIdListener;
 import javax.servlet.http.HttpSessionListener;
 import java.io.IOException;
 import java.io.InputStream;
+import java.net.JarURLConnection;
+import java.net.URISyntaxException;
+import java.net.URL;
+import java.net.URLConnection;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.nio.file.Paths;
 import java.nio.file.attribute.FileTime;
 import java.time.Duration;
 import java.time.ZoneOffset;
@@ -54,11 +61,29 @@ import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.Set;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
+import java.util.jar.JarEntry;
+import java.util.jar.JarFile;
 
 public final class JavaxServletRuntime implements WebAppRuntime {
     private static final DateTimeFormatter HTTP_DATE = DateTimeFormatter.RFC_1123_DATE_TIME;
+    private static final ThreadLocal<byte[]> COPY_BUFFER = new ThreadLocal<byte[]>() {
+        @Override
+        protected byte[] initialValue() {
+            return new byte[8192];
+        }
+    };
+    private static final ServletRequestListener[] EMPTY_REQUEST_LISTENERS =
+            new ServletRequestListener[0];
+    private static final ServletRequestAttributeListener[] EMPTY_REQUEST_ATTRIBUTE_LISTENERS =
+            new ServletRequestAttributeListener[0];
+    private static final CompiledFilter[] EMPTY_COMPILED_FILTERS = new CompiledFilter[0];
+    private static final CompiledFilterMapping[] EMPTY_COMPILED_FILTER_MAPPINGS =
+            new CompiledFilterMapping[0];
+    private static final FilterSelection EMPTY_FILTER_SELECTION =
+            new FilterSelection(EMPTY_COMPILED_FILTERS, true);
 
     private final PreparedWebApp application;
     private final String contextPath;
@@ -77,12 +102,20 @@ public final class JavaxServletRuntime implements WebAppRuntime {
             new ArrayList<WebAppDescriptor.ServletMapping>();
     private final List<WebAppDescriptor.FilterMapping> filterMappings =
             new ArrayList<WebAppDescriptor.FilterMapping>();
+    private final Servlet staticResourceServlet = new StaticResourceServlet();
     private volatile LifecycleState state = LifecycleState.NEW;
+    private volatile ServletRequestListener[] requestListeners = EMPTY_REQUEST_LISTENERS;
+    private volatile ServletRequestAttributeListener[] requestAttributeListeners =
+            EMPTY_REQUEST_ATTRIBUTE_LISTENERS;
+    private volatile CompiledFilterMapping[] compiledFilterMappings =
+            EMPTY_COMPILED_FILTER_MAPPINGS;
     private TinyServletContext servletContext;
     private TinySessionManager sessionManager;
     private ScheduledExecutorService asyncScheduler;
-    private int activeRequests;
+    private final AtomicInteger activeRequests = new AtomicInteger();
     private boolean componentsDestroyed;
+    private volatile boolean waitingForRequests;
+    private int beforeFilterMappingInsertPoint;
 
     public JavaxServletRuntime(PreparedWebApp application, String contextPath) {
         if (application == null) {
@@ -116,13 +149,15 @@ public final class JavaxServletRuntime implements WebAppRuntime {
             asyncScheduler = Executors.newSingleThreadScheduledExecutor(
                     new NamedThreadFactory("tinysc-async-timeout-", true));
             servletContext = new TinyServletContext(contextPath, application.webRoot(),
-                    application.classLoader(), descriptor.contextParams(), this);
+                    application.classLoader(), application.resources(),
+                    descriptor.contextParams(), this);
             sessionManager = new TinySessionManager(
                     servletContext, descriptor.sessionTimeoutMinutes(), this);
             initializeServletContainerInitializers();
             mapper = new ServletMapper(servletMappings);
             initializeListeners();
             initializeFilters();
+            compiledFilterMappings = compileFilterMappings();
             initializeEagerServlets();
             servletContext.markInitialized();
             state = LifecycleState.RUNNING;
@@ -148,25 +183,21 @@ public final class JavaxServletRuntime implements WebAppRuntime {
                 return;
             }
             ServletMappingResult mapping = mapper.map(requestPath);
-            FilterSelection selection = mapping == null
-                    ? FilterSelection.EMPTY : matchingFilters(
-                    mapping.servletName(), requestPath, DispatcherType.REQUEST);
+            FilterSelection selection = matchingFilters(
+                    mapping == null ? "" : mapping.servletName(),
+                    requestPath, DispatcherType.REQUEST);
             ServletHolder mappedServlet = mapping == null ? null : servlets.get(mapping.servletName());
+            if (mapping != null && mappedServlet == null) {
+                throw new ServletException("mapping references unknown servlet: "
+                        + mapping.servletName());
+            }
             boolean asyncSupported = mappedServlet != null && mappedServlet.asyncSupported
                     && selection.asyncSupported;
             request = new TinyHttpServletRequest(exchange, response, servletContext,
                     sessionManager, mapping, requestPath, asyncSupported, asyncScheduler);
             fireRequestInitialized(request);
-            if (mapping == null) {
-                serveStatic(requestPath, exchange.request().method(), response);
-                return;
-            }
-            ServletHolder servlet = mappedServlet;
-            if (servlet == null) {
-                throw new ServletException("mapping references unknown servlet: "
-                        + mapping.servletName());
-            }
-            new ApplicationFilterChain(selection.filters, servlet.get()).doFilter(request, response);
+            Servlet servlet = mapping == null ? staticResourceServlet : mappedServlet.get();
+            new ApplicationFilterChain(selection.filters, servlet).doFilter(request, response);
         } catch (Exception failure) {
             if (request != null && request.asyncContextInternal() != null
                     && !request.asyncContextInternal().isTerminal()) {
@@ -218,8 +249,17 @@ public final class JavaxServletRuntime implements WebAppRuntime {
                 throw new IllegalStateException("runtime cannot stop from state " + state);
             }
             state = LifecycleState.QUIESCING;
-            while (activeRequests > 0 && System.currentTimeMillis() < deadline) {
-                lifecycleMonitor.wait(Math.max(1L, deadline - System.currentTimeMillis()));
+            while (activeRequests.get() > 0 && System.currentTimeMillis() < deadline) {
+                waitingForRequests = true;
+                if (activeRequests.get() == 0) {
+                    waitingForRequests = false;
+                    break;
+                }
+                try {
+                    lifecycleMonitor.wait(Math.max(1L, deadline - System.currentTimeMillis()));
+                } finally {
+                    waitingForRequests = false;
+                }
             }
             state = LifecycleState.STOPPING;
         }
@@ -237,18 +277,23 @@ public final class JavaxServletRuntime implements WebAppRuntime {
     }
 
     private void beginRequest() {
-        synchronized (lifecycleMonitor) {
-            if (state != LifecycleState.RUNNING) {
-                throw new IllegalStateException("runtime is not accepting requests: " + state);
+        LifecycleState current = state;
+        if (current != LifecycleState.RUNNING) {
+            throw new IllegalStateException("runtime is not accepting requests: " + current);
+        }
+        activeRequests.incrementAndGet();
+        current = state;
+        if (current != LifecycleState.RUNNING) {
+            if (activeRequests.decrementAndGet() == 0) {
+                signalRequestsDrained();
             }
-            activeRequests++;
+            throw new IllegalStateException("runtime is not accepting requests: " + current);
         }
     }
 
     private void endRequest() {
-        synchronized (lifecycleMonitor) {
-            activeRequests--;
-            lifecycleMonitor.notifyAll();
+        if (activeRequests.decrementAndGet() == 0) {
+            signalRequestsDrained();
         }
     }
 
@@ -306,11 +351,10 @@ public final class JavaxServletRuntime implements WebAppRuntime {
                 originalRequest.pushDispatch(path, query, mapping, dispatcherType);
         try {
             if (mapping == null) {
-                if (response instanceof HttpServletResponse) {
-                    ((HttpServletResponse) response).sendError(HttpServletResponse.SC_NOT_FOUND);
-                    return;
-                }
-                throw new ServletException("dispatcher target not found: " + path);
+                FilterSelection selection = matchingFilters("", path, dispatcherType);
+                new ApplicationFilterChain(selection.filters, staticResourceServlet)
+                        .doFilter(request, response);
+                return;
             }
             ServletHolder servlet = servlets.get(mapping.servletName());
             if (servlet == null) {
@@ -459,6 +503,8 @@ public final class JavaxServletRuntime implements WebAppRuntime {
                 initializedContextListeners.add(contextListener);
             }
         }
+        requestListeners = requestListeners(listeners);
+        requestAttributeListeners = requestAttributeListeners(listeners);
     }
 
     void fireContextAttributeAdded(String name, Object value) {
@@ -492,32 +538,38 @@ public final class JavaxServletRuntime implements WebAppRuntime {
     }
 
     void fireRequestAttributeAdded(ServletRequest request, String name, Object value) {
+        ServletRequestAttributeListener[] snapshot = requestAttributeListeners;
+        if (snapshot.length == 0) {
+            return;
+        }
         ServletRequestAttributeEvent event =
                 new ServletRequestAttributeEvent(servletContext, request, name, value);
-        for (EventListener listener : listeners) {
-            if (listener instanceof ServletRequestAttributeListener) {
-                ((ServletRequestAttributeListener) listener).attributeAdded(event);
-            }
+        for (ServletRequestAttributeListener listener : snapshot) {
+            listener.attributeAdded(event);
         }
     }
 
     void fireRequestAttributeRemoved(ServletRequest request, String name, Object value) {
+        ServletRequestAttributeListener[] snapshot = requestAttributeListeners;
+        if (snapshot.length == 0) {
+            return;
+        }
         ServletRequestAttributeEvent event =
                 new ServletRequestAttributeEvent(servletContext, request, name, value);
-        for (EventListener listener : listeners) {
-            if (listener instanceof ServletRequestAttributeListener) {
-                ((ServletRequestAttributeListener) listener).attributeRemoved(event);
-            }
+        for (ServletRequestAttributeListener listener : snapshot) {
+            listener.attributeRemoved(event);
         }
     }
 
     void fireRequestAttributeReplaced(ServletRequest request, String name, Object oldValue) {
+        ServletRequestAttributeListener[] snapshot = requestAttributeListeners;
+        if (snapshot.length == 0) {
+            return;
+        }
         ServletRequestAttributeEvent event =
                 new ServletRequestAttributeEvent(servletContext, request, name, oldValue);
-        for (EventListener listener : listeners) {
-            if (listener instanceof ServletRequestAttributeListener) {
-                ((ServletRequestAttributeListener) listener).attributeReplaced(event);
-            }
+        for (ServletRequestAttributeListener listener : snapshot) {
+            listener.attributeReplaced(event);
         }
     }
 
@@ -578,22 +630,24 @@ public final class JavaxServletRuntime implements WebAppRuntime {
     }
 
     private void fireRequestInitialized(ServletRequest request) {
+        ServletRequestListener[] snapshot = requestListeners;
+        if (snapshot.length == 0) {
+            return;
+        }
         ServletRequestEvent event = new ServletRequestEvent(servletContext, request);
-        for (EventListener listener : listeners) {
-            if (listener instanceof ServletRequestListener) {
-                ((ServletRequestListener) listener).requestInitialized(event);
-            }
+        for (ServletRequestListener listener : snapshot) {
+            listener.requestInitialized(event);
         }
     }
 
     private void fireRequestDestroyed(ServletRequest request) {
+        ServletRequestListener[] snapshot = requestListeners;
+        if (snapshot.length == 0) {
+            return;
+        }
         ServletRequestEvent event = new ServletRequestEvent(servletContext, request);
-        List<EventListener> reversed = new ArrayList<EventListener>(listeners);
-        Collections.reverse(reversed);
-        for (EventListener listener : reversed) {
-            if (listener instanceof ServletRequestListener) {
-                ((ServletRequestListener) listener).requestDestroyed(event);
-            }
+        for (int index = snapshot.length - 1; index >= 0; index--) {
+            snapshot[index].requestDestroyed(event);
         }
     }
 
@@ -624,34 +678,76 @@ public final class JavaxServletRuntime implements WebAppRuntime {
 
     private FilterSelection matchingFilters(String servletName, String path,
                                             DispatcherType dispatcherType) {
-        Set<String> names = new LinkedHashSet<String>();
-        for (WebAppDescriptor.FilterMapping mapping : filterMappings) {
-            if (!mapping.dispatcherTypes().contains(dispatcherType.name())) {
-                continue;
+        CompiledFilterMapping[] mappings = compiledFilterMappings;
+        if (mappings.length == 0) {
+            return EMPTY_FILTER_SELECTION;
+        }
+        FilterSelectionBuilder builder = new FilterSelectionBuilder(mappings.length);
+        for (CompiledFilterMapping mapping : mappings) {
+            if (mapping.matchesDispatcher(dispatcherType) && mapping.matchesUrlPattern(path)) {
+                builder.add(mapping.filter);
             }
-            boolean matches = mapping.servletNames().contains(servletName);
-            if (!matches) {
-                for (String pattern : mapping.urlPatterns()) {
-                    if (ServletMapper.matchesUrlPattern(pattern, path)) {
-                        matches = true;
-                        break;
-                    }
+        }
+        for (CompiledFilterMapping mapping : mappings) {
+            if (mapping.matchesDispatcher(dispatcherType) && mapping.matchesServletName(servletName)) {
+                builder.add(mapping.filter);
+            }
+        }
+        return builder.build();
+    }
+
+    private static final class FilterSelectionBuilder {
+        private final CompiledFilter[] selected;
+        private int selectedCount;
+        private boolean asyncSupported = true;
+
+        private FilterSelectionBuilder(int capacity) {
+            selected = new CompiledFilter[capacity];
+        }
+
+        private void add(CompiledFilter filter) {
+            for (int index = 0; index < selectedCount; index++) {
+                if (selected[index] == filter) {
+                    return;
                 }
             }
-            if (matches) {
-                names.add(mapping.filterName());
-            }
+            selected[selectedCount++] = filter;
+            asyncSupported &= filter.asyncSupported;
         }
-        List<Filter> result = new ArrayList<Filter>();
-        boolean asyncSupported = true;
-        for (String name : names) {
-            FilterHolder holder = filters.get(name);
-            if (holder != null) {
-                result.add(holder.filter);
-                asyncSupported &= holder.asyncSupported;
+
+        private FilterSelection build() {
+            if (selectedCount == 0) {
+                return EMPTY_FILTER_SELECTION;
             }
+            CompiledFilter[] result = selectedCount == selected.length ? selected
+                    : java.util.Arrays.copyOf(selected, selectedCount);
+            return new FilterSelection(result, asyncSupported);
         }
-        return new FilterSelection(result, asyncSupported);
+    }
+
+    private CompiledFilterMapping[] compileFilterMappings() {
+        if (filterMappings.isEmpty()) {
+            return EMPTY_COMPILED_FILTER_MAPPINGS;
+        }
+        Map<String, CompiledFilter> compiledFilters =
+                new LinkedHashMap<String, CompiledFilter>(filters.size());
+        List<CompiledFilterMapping> result = new ArrayList<CompiledFilterMapping>(
+                filterMappings.size());
+        for (WebAppDescriptor.FilterMapping mapping : filterMappings) {
+            FilterHolder holder = filters.get(mapping.filterName());
+            if (holder == null || holder.filter == null) {
+                continue;
+            }
+            CompiledFilter compiled = compiledFilters.get(holder.name);
+            if (compiled == null) {
+                compiled = new CompiledFilter(holder.filter, holder.asyncSupported);
+                compiledFilters.put(holder.name, compiled);
+            }
+            result.add(new CompiledFilterMapping(compiled, mapping.servletNames(),
+                    mapping.urlPatterns(), mapping.dispatcherTypes()));
+        }
+        return result.isEmpty() ? EMPTY_COMPILED_FILTER_MAPPINGS
+                : result.toArray(new CompiledFilterMapping[result.size()]);
     }
 
     private void finishRequest(TinyHttpServletRequest request,
@@ -671,10 +767,12 @@ public final class JavaxServletRuntime implements WebAppRuntime {
         }
     }
 
-    private void serveStatic(String requestPath, String method, TinyHttpServletResponse response)
+    private void serveStatic(String requestPath, HttpServletRequest request,
+                             HttpServletResponse response)
             throws IOException {
-        if (!"GET".equals(method) && !"HEAD".equals(method)) {
-            response.setHeader("Allow", "GET, HEAD");
+        String method = request.getMethod();
+        if (!"GET".equals(method) && !"HEAD".equals(method) && !"POST".equals(method)) {
+            response.setHeader("Allow", "GET, HEAD, POST");
             response.sendError(HttpServletResponse.SC_METHOD_NOT_ALLOWED);
             return;
         }
@@ -684,46 +782,134 @@ public final class JavaxServletRuntime implements WebAppRuntime {
             response.sendError(HttpServletResponse.SC_NOT_FOUND);
             return;
         }
-        Path root = servletContext.webRoot();
-        Path resource = root.resolve(requestPath.substring(1)).normalize();
-        if (!resource.startsWith(root)) {
+        URL resourceUrl = staticResource(requestPath);
+        if (resourceUrl == null) {
             response.sendError(HttpServletResponse.SC_NOT_FOUND);
             return;
         }
-        if (Files.isDirectory(resource)) {
-            resource = welcomeResource(resource);
-        }
-        if (resource == null || !Files.isRegularFile(resource)) {
-            response.sendError(HttpServletResponse.SC_NOT_FOUND);
-            return;
-        }
-        String mimeType = servletContext.getMimeType(resource.getFileName().toString());
+        String mimeType = servletContext.getMimeType(resourceUrl.getPath());
         if (mimeType != null) {
             response.setContentType(mimeType);
         }
-        long size = Files.size(resource);
-        response.setContentLengthLong(size);
-        FileTime modified = Files.getLastModifiedTime(resource);
-        response.setHeader("Last-Modified", HTTP_DATE.format(
-                modified.toInstant().atZone(ZoneOffset.UTC)));
-        if ("HEAD".equals(method)) {
+        if ("jar".equals(resourceUrl.getProtocol())) {
+            serveJarResource(resourceUrl, request, response);
             return;
         }
-        try (InputStream input = Files.newInputStream(resource)) {
-            byte[] buffer = new byte[8192];
-            int read;
-            while ((read = input.read(buffer)) >= 0) {
-                response.getOutputStream().write(buffer, 0, read);
+        serveFileResource(resourceUrl, request, response);
+    }
+
+    private void serveJarResource(URL resourceUrl, HttpServletRequest request,
+                                  HttpServletResponse response) throws IOException {
+        JarURLConnection location = (JarURLConnection) resourceUrl.openConnection();
+        Path archivePath;
+        try {
+            archivePath = Paths.get(location.getJarFileURL().toURI());
+        } catch (URISyntaxException exception) {
+            throw new IOException("invalid resource JAR URL: " + resourceUrl, exception);
+        }
+        try (JarFile archive = new JarFile(archivePath.toFile())) {
+            JarEntry entry = archive.getJarEntry(location.getEntryName());
+            if (entry == null || entry.isDirectory()) {
+                response.sendError(HttpServletResponse.SC_NOT_FOUND);
+                return;
+            }
+            long modified = entry.getTime();
+            if (modified > 0L) {
+                response.setHeader("Last-Modified", HTTP_DATE.format(
+                        java.time.Instant.ofEpochMilli(modified)
+                                .atZone(ZoneOffset.UTC)));
+                if (isNotModified(request, modified)) {
+                    response.setStatus(HttpServletResponse.SC_NOT_MODIFIED);
+                    return;
+                }
+            }
+            if (entry.getSize() >= 0L) {
+                response.setContentLengthLong(entry.getSize());
+            }
+            if ("HEAD".equals(request.getMethod())) {
+                return;
+            }
+            try (InputStream input = archive.getInputStream(entry)) {
+                copy(input, response);
             }
         }
     }
 
-    private Path welcomeResource(Path directory) {
+    private void serveFileResource(URL resourceUrl, HttpServletRequest request,
+                                   HttpServletResponse response) throws IOException {
+        Path file;
+        try {
+            file = Paths.get(resourceUrl.toURI());
+        } catch (URISyntaxException exception) {
+            throw new IOException("invalid resource file URL: " + resourceUrl, exception);
+        }
+        FileTime modifiedTime = Files.getLastModifiedTime(file);
+        long modified = modifiedTime.toMillis();
+        if (modified > 0L) {
+            response.setHeader("Last-Modified", HTTP_DATE.format(
+                    java.time.Instant.ofEpochMilli(modified).atZone(ZoneOffset.UTC)));
+            if (isNotModified(request, modified)) {
+                response.setStatus(HttpServletResponse.SC_NOT_MODIFIED);
+                return;
+            }
+        }
+        long size = Files.size(file);
+        if (size >= 0L) {
+            response.setContentLengthLong(size);
+        }
+        if ("HEAD".equals(request.getMethod())) {
+            return;
+        }
+        try (InputStream input = Files.newInputStream(file)) {
+            copy(input, response);
+        }
+    }
+
+    private static void copy(InputStream input, HttpServletResponse response)
+            throws IOException {
+        byte[] buffer = COPY_BUFFER.get();
+        int read;
+        while ((read = input.read(buffer)) >= 0) {
+            response.getOutputStream().write(buffer, 0, read);
+        }
+    }
+
+    private static boolean isNotModified(HttpServletRequest request, long modified) {
+        String method = request.getMethod();
+        if (!"GET".equals(method) && !"HEAD".equals(method)) {
+            return false;
+        }
+        long ifModifiedSince;
+        try {
+            ifModifiedSince = request.getDateHeader("If-Modified-Since");
+        } catch (IllegalArgumentException invalidDate) {
+            return false;
+        }
+        return ifModifiedSince >= 0L
+                && modified / 1000L <= ifModifiedSince / 1000L;
+    }
+
+    private URL staticResource(String requestPath) throws IOException {
+        Path root = servletContext.webRoot();
+        Path file = root.resolve(requestPath.substring(1)).normalize();
+        if (!file.startsWith(root)) {
+            return null;
+        }
+        URL exact = servletContext.getResource(requestPath);
+        boolean directory = Files.isDirectory(file) || requestPath.endsWith("/")
+                || (exact != null && exact.toExternalForm().endsWith("/"));
+        if (!directory && exact == null) {
+            directory = servletContext.getResourcePaths(requestPath + "/") != null;
+        }
+        if (!directory) {
+            return exact;
+        }
+        String base = requestPath.endsWith("/") ? requestPath : requestPath + "/";
         List<String> welcomeFiles = descriptor.welcomeFiles().isEmpty()
                 ? java.util.Arrays.asList("index.html", "index.htm") : descriptor.welcomeFiles();
         for (String welcome : welcomeFiles) {
-            Path candidate = directory.resolve(welcome).normalize();
-            if (candidate.startsWith(directory) && Files.isRegularFile(candidate)) {
+            URL candidate = servletContext.getResource(base + welcome);
+            if (candidate != null && !candidate.toExternalForm().endsWith("/")) {
                 return candidate;
             }
         }
@@ -774,6 +960,41 @@ public final class JavaxServletRuntime implements WebAppRuntime {
                 servletContext.log("Cannot remove web application temp directory", failure);
             }
         }
+    }
+
+    private void signalRequestsDrained() {
+        if (!waitingForRequests) {
+            return;
+        }
+        synchronized (lifecycleMonitor) {
+            if (waitingForRequests && activeRequests.get() == 0) {
+                lifecycleMonitor.notifyAll();
+            }
+        }
+    }
+
+    private static ServletRequestListener[] requestListeners(List<EventListener> listeners) {
+        List<ServletRequestListener> result = new ArrayList<ServletRequestListener>();
+        for (EventListener listener : listeners) {
+            if (listener instanceof ServletRequestListener) {
+                result.add((ServletRequestListener) listener);
+            }
+        }
+        return result.isEmpty() ? EMPTY_REQUEST_LISTENERS
+                : result.toArray(new ServletRequestListener[result.size()]);
+    }
+
+    private static ServletRequestAttributeListener[] requestAttributeListeners(
+            List<EventListener> listeners) {
+        List<ServletRequestAttributeListener> result =
+                new ArrayList<ServletRequestAttributeListener>();
+        for (EventListener listener : listeners) {
+            if (listener instanceof ServletRequestAttributeListener) {
+                result.add((ServletRequestAttributeListener) listener);
+            }
+        }
+        return result.isEmpty() ? EMPTY_REQUEST_ATTRIBUTE_LISTENERS
+                : result.toArray(new ServletRequestAttributeListener[result.size()]);
     }
 
     private ClassLoader enterWebAppClassLoader() {
@@ -1073,7 +1294,8 @@ public final class JavaxServletRuntime implements WebAppRuntime {
             if (after) {
                 filterMappings.add(mapping);
             } else {
-                filterMappings.add(0, mapping);
+                filterMappings.add(beforeFilterMappingInsertPoint, mapping);
+                beforeFilterMappingInsertPoint++;
             }
         }
     }
@@ -1148,12 +1370,75 @@ public final class JavaxServletRuntime implements WebAppRuntime {
         }
     }
 
+    private static final class CompiledFilter {
+        private final Filter filter;
+        private final boolean asyncSupported;
+
+        private CompiledFilter(Filter filter, boolean asyncSupported) {
+            this.filter = filter;
+            this.asyncSupported = asyncSupported;
+        }
+    }
+
+    private static final class CompiledFilterMapping {
+        private final CompiledFilter filter;
+        private final String[] servletNames;
+        private final String[] urlPatterns;
+        private final DispatcherType[] dispatcherTypes;
+
+        private CompiledFilterMapping(CompiledFilter filter,
+                                      List<String> servletNames, List<String> urlPatterns,
+                                      List<String> dispatcherTypes) {
+            this.filter = filter;
+            this.servletNames = servletNames.isEmpty() ? null
+                    : servletNames.toArray(new String[servletNames.size()]);
+            this.urlPatterns = urlPatterns.isEmpty() ? null
+                    : urlPatterns.toArray(new String[urlPatterns.size()]);
+            this.dispatcherTypes = new DispatcherType[dispatcherTypes.size()];
+            for (int index = 0; index < dispatcherTypes.size(); index++) {
+                this.dispatcherTypes[index] = DispatcherType.valueOf(dispatcherTypes.get(index));
+            }
+        }
+
+        private boolean matchesDispatcher(DispatcherType dispatcherType) {
+            for (DispatcherType candidate : dispatcherTypes) {
+                if (candidate == dispatcherType) {
+                    return true;
+                }
+            }
+            return false;
+        }
+
+        private boolean matchesServletName(String servletName) {
+            if (servletNames == null) {
+                return false;
+            }
+            for (String candidate : servletNames) {
+                if (candidate.equals(servletName)) {
+                    return true;
+                }
+            }
+            return false;
+        }
+
+        private boolean matchesUrlPattern(String path) {
+            if (urlPatterns != null) {
+                for (String pattern : urlPatterns) {
+                    if (ServletMapper.matchesUrlPattern(pattern, path)) {
+                        return true;
+                    }
+                }
+            }
+            return false;
+        }
+    }
+
     private static final class ApplicationFilterChain implements FilterChain {
-        private final List<Filter> filters;
+        private final CompiledFilter[] filters;
         private final Servlet servlet;
         private int index;
 
-        private ApplicationFilterChain(List<Filter> filters, Servlet servlet) {
+        private ApplicationFilterChain(CompiledFilter[] filters, Servlet servlet) {
             this.filters = filters;
             this.servlet = servlet;
         }
@@ -1161,22 +1446,27 @@ public final class JavaxServletRuntime implements WebAppRuntime {
         @Override
         public void doFilter(ServletRequest request, ServletResponse response)
                 throws IOException, ServletException {
-            if (index < filters.size()) {
-                filters.get(index++).doFilter(request, response, this);
+            if (index < filters.length) {
+                filters[index++].filter.doFilter(request, response, this);
             } else {
                 servlet.service(request, response);
             }
         }
     }
 
-    private static final class FilterSelection {
-        private static final FilterSelection EMPTY =
-                new FilterSelection(Collections.<Filter>emptyList(), false);
+    private final class StaticResourceServlet extends HttpServlet {
+        @Override
+        protected void service(HttpServletRequest request, HttpServletResponse response)
+                throws IOException {
+            serveStatic(request.getServletPath(), request, response);
+        }
+    }
 
-        private final List<Filter> filters;
+    private static final class FilterSelection {
+        private final CompiledFilter[] filters;
         private final boolean asyncSupported;
 
-        private FilterSelection(List<Filter> filters, boolean asyncSupported) {
+        private FilterSelection(CompiledFilter[] filters, boolean asyncSupported) {
             this.filters = filters;
             this.asyncSupported = asyncSupported;
         }

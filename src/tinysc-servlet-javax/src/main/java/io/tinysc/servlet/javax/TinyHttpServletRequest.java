@@ -49,7 +49,7 @@ final class TinyHttpServletRequest implements HttpServletRequest {
     private String requestPath;
     private final boolean asyncSupported;
     private final ScheduledExecutorService asyncScheduler;
-    private final Map<String, Object> attributes = new LinkedHashMap<String, Object>();
+    private Map<String, Object> attributes;
     private String characterEncoding = "ISO-8859-1";
     private String currentQuery;
     private DispatcherType dispatcherType = DispatcherType.REQUEST;
@@ -59,6 +59,8 @@ final class TinyHttpServletRequest implements HttpServletRequest {
     private Cookie[] cookies;
     private boolean cookiesParsed;
     private String requestedSessionId;
+    private boolean requestedSessionIdParsed;
+    private boolean requestedSessionIdFromCookie;
     private TinyHttpSession session;
     private TinyAsyncContext asyncContext;
 
@@ -76,7 +78,6 @@ final class TinyHttpServletRequest implements HttpServletRequest {
         currentQuery = request.query();
         this.asyncSupported = asyncSupported;
         this.asyncScheduler = asyncScheduler;
-        this.requestedSessionId = findRequestedSessionId();
     }
 
     @Override
@@ -168,7 +169,7 @@ final class TinyHttpServletRequest implements HttpServletRequest {
 
     @Override
     public String getRequestedSessionId() {
-        return requestedSessionId;
+        return requestedSessionId();
     }
 
     @Override
@@ -196,13 +197,13 @@ final class TinyHttpServletRequest implements HttpServletRequest {
 
     @Override
     public HttpSession getSession(boolean create) {
-        if (session == null && requestedSessionId != null) {
-            session = sessions.find(requestedSessionId);
+        String requestedId = requestedSessionId();
+        if (session == null && requestedId != null) {
+            session = sessions.find(requestedId);
         }
         if (session == null && create) {
             session = sessions.create();
-            requestedSessionId = session.getId();
-            response.addCookie(context.sessionCookie(requestedSessionId, isSecure()));
+            response.addCookie(context.sessionCookie(session.getId(), isSecure()));
         }
         return session;
     }
@@ -219,19 +220,23 @@ final class TinyHttpServletRequest implements HttpServletRequest {
             throw new IllegalStateException("request has no session");
         }
         String id = sessions.changeId(current);
-        requestedSessionId = id;
+        if (requestedSessionId != null) {
+            requestedSessionId = id;
+        }
         response.addCookie(context.sessionCookie(id, isSecure()));
         return id;
     }
 
     @Override
     public boolean isRequestedSessionIdValid() {
-        return requestedSessionId != null && sessions.find(requestedSessionId) != null;
+        String requestedId = requestedSessionId();
+        return requestedId != null && sessions.find(requestedId) != null;
     }
 
     @Override
     public boolean isRequestedSessionIdFromCookie() {
-        return requestedSessionId != null;
+        requestedSessionId();
+        return requestedSessionIdFromCookie;
     }
 
     @Override
@@ -276,12 +281,14 @@ final class TinyHttpServletRequest implements HttpServletRequest {
 
     @Override
     public Object getAttribute(String name) {
-        return attributes.get(name);
+        return attributes == null ? null : attributes.get(name);
     }
 
     @Override
     public Enumeration<String> getAttributeNames() {
-        return Collections.enumeration(attributes.keySet());
+        return attributes == null
+                ? Collections.enumeration(Collections.<String>emptySet())
+                : Collections.enumeration(attributes.keySet());
     }
 
     @Override
@@ -401,6 +408,9 @@ final class TinyHttpServletRequest implements HttpServletRequest {
         if (value == null) {
             removeAttribute(name);
         } else {
+            if (attributes == null) {
+                attributes = new LinkedHashMap<String, Object>();
+            }
             Object oldValue = attributes.put(name, value);
             if (oldValue == null) {
                 context.registry().fireRequestAttributeAdded(this, name, value);
@@ -412,6 +422,9 @@ final class TinyHttpServletRequest implements HttpServletRequest {
 
     @Override
     public void removeAttribute(String name) {
+        if (attributes == null) {
+            return;
+        }
         Object oldValue = attributes.remove(name);
         if (oldValue != null) {
             context.registry().fireRequestAttributeRemoved(this, name, oldValue);
@@ -616,6 +629,7 @@ final class TinyHttpServletRequest implements HttpServletRequest {
         if (cookies != null) {
             for (Cookie cookie : cookies) {
                 if (context.sessionCookieName().equals(cookie.getName())) {
+                    requestedSessionIdFromCookie = true;
                     return cookie.getValue();
                 }
             }
@@ -623,12 +637,20 @@ final class TinyHttpServletRequest implements HttpServletRequest {
         return null;
     }
 
+    private String requestedSessionId() {
+        if (!requestedSessionIdParsed) {
+            requestedSessionId = findRequestedSessionId();
+            requestedSessionIdParsed = true;
+        }
+        return requestedSessionId;
+    }
+
     private void parseCookies() {
         if (cookiesParsed) {
             return;
         }
         cookiesParsed = true;
-        List<Cookie> result = new ArrayList<Cookie>();
+        List<Cookie> result = null;
         for (String header : request.headerValues("Cookie")) {
             for (String token : header.split(";")) {
                 int equals = token.indexOf('=');
@@ -636,14 +658,18 @@ final class TinyHttpServletRequest implements HttpServletRequest {
                     String name = token.substring(0, equals).trim();
                     String value = token.substring(equals + 1).trim();
                     try {
-                        result.add(new Cookie(name, value));
+                        Cookie cookie = new Cookie(name, value);
+                        if (result == null) {
+                            result = new ArrayList<Cookie>();
+                        }
+                        result.add(cookie);
                     } catch (IllegalArgumentException ignored) {
                         // Invalid individual cookies do not make the entire request unusable.
                     }
                 }
             }
         }
-        cookies = result.isEmpty() ? null : result.toArray(new Cookie[result.size()]);
+        cookies = result == null ? null : result.toArray(new Cookie[result.size()]);
     }
 
     private static final class TinyInputStream extends ServletInputStream {

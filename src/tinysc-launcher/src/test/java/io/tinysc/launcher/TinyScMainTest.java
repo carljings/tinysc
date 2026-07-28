@@ -1,15 +1,22 @@
 package io.tinysc.launcher;
 
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.io.TempDir;
 
 import java.io.ByteArrayOutputStream;
 import java.io.PrintStream;
 import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
+import java.nio.file.Path;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class TinyScMainTest {
+    @TempDir
+    Path temporaryDirectory;
+
     @Test
     void rejectsUnknownStartOptionBeforeOpeningWar() throws Exception {
         ByteArrayOutputStream errorBytes = new ByteArrayOutputStream();
@@ -37,5 +44,198 @@ class TinyScMainTest {
         assertEquals(2, exitCode);
         assertTrue(new String(errorBytes.toByteArray(), StandardCharsets.UTF_8)
                 .contains("Expected --name value"));
+    }
+
+    @Test
+    void persistsStartupFailureAndRestoresSystemStreams() throws Exception {
+        PrintStream originalOutput = System.out;
+        PrintStream originalError = System.err;
+        ByteArrayOutputStream terminalOutput = new ByteArrayOutputStream();
+        ByteArrayOutputStream terminalError = new ByteArrayOutputStream();
+        Path base = temporaryDirectory.resolve("base");
+
+        int exitCode = TinyScMain.run(new String[]{
+                "start",
+                "--war", temporaryDirectory.resolve("missing.war").toString(),
+                "--base", base.toString(),
+                "--port", "0"
+        }, new PrintStream(terminalOutput, true, "UTF-8"),
+                new PrintStream(terminalError, true, "UTF-8"));
+
+        assertEquals(1, exitCode);
+        assertSame(originalOutput, System.out);
+        assertSame(originalError, System.err);
+        String logOutput = new String(Files.readAllBytes(base.resolve("logs/tinysc.log")),
+                StandardCharsets.UTF_8);
+        assertTrue(logOutput.contains("tinysc starting"), logOutput);
+        assertTrue(logOutput.contains("missing.war"), logOutput);
+        assertTrue(logOutput.contains("ioThreads="
+                + Math.max(1, Math.min(4, Runtime.getRuntime().availableProcessors()))),
+                logOutput);
+        assertTrue(logOutput.contains("workerMin="), logOutput);
+        assertTrue(logOutput.contains("workerMax="), logOutput);
+        assertTrue(logOutput.contains("workerQueue=100"), logOutput);
+        assertTrue(logOutput.contains("workerIdleMs=60000"), logOutput);
+        assertTrue(logOutput.contains("maxConnections=1024"), logOutput);
+        assertTrue(logOutput.contains("maxInflightRequests="), logOutput);
+        assertTrue(logOutput.contains("maxInflightRequestBytes=67108864"), logOutput);
+        assertTrue(logOutput.contains("maxRawIngressBytes=67108864"), logOutput);
+        assertTrue(logOutput.contains("requestReadTimeoutMs=30000"), logOutput);
+        assertTrue(logOutput.contains("requestBodyTimeoutMs=300000"), logOutput);
+        assertTrue(logOutput.contains("responseWriteTimeoutMs=30000"), logOutput);
+        assertTrue(logOutput.contains("accessLog=true"), logOutput);
+        assertTrue(logOutput.contains("tinysc access log file="
+                + base.resolve("logs/access.log")), logOutput);
+        assertTrue(terminalOutput.toString("UTF-8").contains("tinysc starting"));
+        assertTrue(terminalError.size() > 0);
+    }
+
+    @Test
+    void logsExplicitWorkerSettings() throws Exception {
+        ByteArrayOutputStream terminalOutput = new ByteArrayOutputStream();
+        ByteArrayOutputStream terminalError = new ByteArrayOutputStream();
+        Path base = temporaryDirectory.resolve("explicit-base");
+
+        int exitCode = TinyScMain.run(new String[]{
+                "start",
+                "--war", temporaryDirectory.resolve("missing.war").toString(),
+                "--base", base.toString(),
+                "--io-threads", "3",
+                "--workers", "9",
+                "--min-workers", "3",
+                "--worker-queue", "7",
+                "--worker-idle-timeout", "45",
+                "--max-connections", "11",
+                "--max-inflight-request-bytes", "4294967296",
+                "--max-raw-ingress-bytes", "8589934592",
+                "--request-read-timeout", "12345",
+                "--request-body-timeout", "54321",
+                "--response-write-timeout", "45678",
+                "--access-log", "false"
+        }, new PrintStream(terminalOutput, true, "UTF-8"),
+                new PrintStream(terminalError, true, "UTF-8"));
+
+        assertEquals(1, exitCode);
+        String logOutput = new String(Files.readAllBytes(base.resolve("logs/tinysc.log")),
+                StandardCharsets.UTF_8);
+        assertTrue(logOutput.contains("ioThreads=3"), logOutput);
+        assertTrue(logOutput.contains("workerMin=3"), logOutput);
+        assertTrue(logOutput.contains("workerMax=9"), logOutput);
+        assertTrue(logOutput.contains("workerQueue=7"), logOutput);
+        assertTrue(logOutput.contains("workerIdleMs=45000"), logOutput);
+        assertTrue(logOutput.contains("maxConnections=11"), logOutput);
+        assertTrue(logOutput.contains("maxInflightRequests=16"), logOutput);
+        assertTrue(logOutput.contains("maxInflightRequestBytes=4294967296"), logOutput);
+        assertTrue(logOutput.contains("maxRawIngressBytes=8589934592"), logOutput);
+        assertTrue(logOutput.contains("requestReadTimeoutMs=12345"), logOutput);
+        assertTrue(logOutput.contains("requestBodyTimeoutMs=54321"), logOutput);
+        assertTrue(logOutput.contains("responseWriteTimeoutMs=45678"), logOutput);
+        assertTrue(logOutput.contains("accessLog=false"), logOutput);
+    }
+
+    @Test
+    void rejectsInvalidWorkerOptionValues() throws Exception {
+        ByteArrayOutputStream minWorkersErrorBytes = new ByteArrayOutputStream();
+
+        int minWorkersExitCode = TinyScMain.run(new String[]{
+                "start", "--war", "missing.war", "--min-workers", "0"
+        }, new PrintStream(new ByteArrayOutputStream()),
+                new PrintStream(minWorkersErrorBytes, true, "UTF-8"));
+
+        assertEquals(2, minWorkersExitCode);
+        assertTrue(new String(minWorkersErrorBytes.toByteArray(), StandardCharsets.UTF_8)
+                .contains("Option --min-workers must be positive"));
+
+        ByteArrayOutputStream zeroErrorBytes = new ByteArrayOutputStream();
+
+        int zeroExitCode = TinyScMain.run(new String[]{
+                "start", "--war", "missing.war", "--worker-idle-timeout", "0"
+        }, new PrintStream(new ByteArrayOutputStream()),
+                new PrintStream(zeroErrorBytes, true, "UTF-8"));
+
+        assertEquals(2, zeroExitCode);
+        assertTrue(new String(zeroErrorBytes.toByteArray(), StandardCharsets.UTF_8)
+                .contains("Option --worker-idle-timeout must be positive"));
+
+        ByteArrayOutputStream overflowErrorBytes = new ByteArrayOutputStream();
+        int overflowExitCode = TinyScMain.run(new String[]{
+                "start", "--war", "missing.war", "--worker-idle-timeout", "9223372036854776"
+        }, new PrintStream(new ByteArrayOutputStream()),
+                new PrintStream(overflowErrorBytes, true, "UTF-8"));
+
+        assertEquals(2, overflowExitCode);
+        assertTrue(new String(overflowErrorBytes.toByteArray(), StandardCharsets.UTF_8)
+                .contains("Option --worker-idle-timeout is too large"));
+    }
+
+    @Test
+    void rejectsInvalidAdmissionOptionValues() throws Exception {
+        ByteArrayOutputStream connectionError = new ByteArrayOutputStream();
+        int connectionExit = TinyScMain.run(new String[]{
+                "start", "--war", "missing.war", "--max-connections", "0"
+        }, new PrintStream(new ByteArrayOutputStream()),
+                new PrintStream(connectionError, true, "UTF-8"));
+        assertEquals(2, connectionExit);
+        assertTrue(new String(connectionError.toByteArray(), StandardCharsets.UTF_8)
+                .contains("Option --max-connections must be positive"));
+
+        ByteArrayOutputStream bytesError = new ByteArrayOutputStream();
+        int bytesExit = TinyScMain.run(new String[]{
+                "start", "--war", "missing.war", "--max-inflight-request-bytes", "0"
+        }, new PrintStream(new ByteArrayOutputStream()),
+                new PrintStream(bytesError, true, "UTF-8"));
+        assertEquals(2, bytesExit);
+        assertTrue(new String(bytesError.toByteArray(), StandardCharsets.UTF_8)
+                .contains("Option --max-inflight-request-bytes must be positive"));
+
+        ByteArrayOutputStream rawBytesError = new ByteArrayOutputStream();
+        int rawBytesExit = TinyScMain.run(new String[]{
+                "start", "--war", "missing.war", "--max-raw-ingress-bytes", "0"
+        }, new PrintStream(new ByteArrayOutputStream()),
+                new PrintStream(rawBytesError, true, "UTF-8"));
+        assertEquals(2, rawBytesExit);
+        assertTrue(new String(rawBytesError.toByteArray(), StandardCharsets.UTF_8)
+                .contains("Option --max-raw-ingress-bytes must be positive"));
+
+        ByteArrayOutputStream timeoutError = new ByteArrayOutputStream();
+        int timeoutExit = TinyScMain.run(new String[]{
+                "start", "--war", "missing.war", "--request-read-timeout", "0"
+        }, new PrintStream(new ByteArrayOutputStream()),
+                new PrintStream(timeoutError, true, "UTF-8"));
+        assertEquals(2, timeoutExit);
+        assertTrue(new String(timeoutError.toByteArray(), StandardCharsets.UTF_8)
+                .contains("Option --request-read-timeout must be positive"));
+
+        ByteArrayOutputStream bodyTimeoutError = new ByteArrayOutputStream();
+        int bodyTimeoutExit = TinyScMain.run(new String[]{
+                "start", "--war", "missing.war", "--request-body-timeout", "0"
+        }, new PrintStream(new ByteArrayOutputStream()),
+                new PrintStream(bodyTimeoutError, true, "UTF-8"));
+        assertEquals(2, bodyTimeoutExit);
+        assertTrue(new String(bodyTimeoutError.toByteArray(), StandardCharsets.UTF_8)
+                .contains("Option --request-body-timeout must be positive"));
+
+        ByteArrayOutputStream writeTimeoutError = new ByteArrayOutputStream();
+        int writeTimeoutExit = TinyScMain.run(new String[]{
+                "start", "--war", "missing.war", "--response-write-timeout", "0"
+        }, new PrintStream(new ByteArrayOutputStream()),
+                new PrintStream(writeTimeoutError, true, "UTF-8"));
+        assertEquals(2, writeTimeoutExit);
+        assertTrue(new String(writeTimeoutError.toByteArray(), StandardCharsets.UTF_8)
+                .contains("Option --response-write-timeout must be positive"));
+    }
+
+    @Test
+    void rejectsNonStrictAccessLogBoolean() throws Exception {
+        ByteArrayOutputStream errorBytes = new ByteArrayOutputStream();
+
+        int exitCode = TinyScMain.run(new String[]{
+                "start", "--war", "missing.war", "--access-log", "TRUE"
+        }, new PrintStream(new ByteArrayOutputStream()),
+                new PrintStream(errorBytes, true, "UTF-8"));
+
+        assertEquals(2, exitCode);
+        assertTrue(new String(errorBytes.toByteArray(), StandardCharsets.UTF_8)
+                .contains("Option --access-log must be true or false"));
     }
 }

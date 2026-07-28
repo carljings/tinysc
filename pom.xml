@@ -18,6 +18,7 @@
         <module>src/tinysc-http-netty</module>
         <module>src/tinysc-servlet-javax</module>
         <module>src/tinysc-launcher</module>
+        <module>src/tinysc-testapp-resources</module>
         <module>src/tinysc-testapp-javax</module>
         <module>src/tinysc-integration-tests</module>
     </modules>

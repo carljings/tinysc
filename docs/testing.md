@@ -33,8 +33,9 @@
 ## Java 8 门禁
 
 ```bash
-JAVA_HOME=$(/usr/libexec/java_home -v 1.8) \
-  "$JAVA_HOME/bin/java" -version
+JAVA_HOME=$(/usr/libexec/java_home -v 1.8)
+"$JAVA_HOME/bin/java" -version
+JAVA_HOME="$JAVA_HOME" mvn -B -ntp clean verify
 ```
 
 发布检查还需要扫描全部发行 class，确认 major version 不高于 52。
@@ -46,10 +47,23 @@ JAVA_HOME=$(/usr/libexec/java_home -v 1.8) \
 ## 当前自动化覆盖
 
 当前 Probe WAR 端到端测试在随机端口验证：Filter → Servlet、参数与映射、Listener、Session
-续用、SCI 动态注册、异步完成、RequestDispatcher forward、静态 GET/HEAD、`WEB-INF` 保护和
-context 外 404。HTTP 模块另测工作线程交接及 Content-Length/Transfer-Encoding 歧义拒绝；
-部署模块测试安全展开、XML 解析和应用线程清理。
+续用、SCI 动态注册、异步完成、RequestDispatcher forward、静态 GET/HEAD、Tomcat 8.5 兼容的
+静态 POST 读取、Resource JAR 的直接/forward/HEAD/POST/欢迎页和 ServletContext 资源 API、
+Web 根优先级、`WEB-INF` 保护以及 context
+外 404。HTTP 模块另测工作线程交接、Content-Length/Transfer-Encoding 歧义拒绝、连接上限关闭、
+`maxRawIngressBytes` 对实际 `HttpContent` 字节的增量占用与断开/超时/失败后的精确释放、`408`
+请求体总时限、响应写超时守护、在途请求/字节准入、同一 HTTP/1.1 channel 的串行化、decoder failure
+的 lease 配对，以及 deferred exchange 的停机等待；同一连接上后续 pipelined 请求的 raw timeout、
+超长 Header 和 `Expect: 100-continue` 均不会抢占当前响应。部署模块测试安全展开、XML 解析和应用
+线程清理。HTTP 模块还验证 access log 的独立路径、敏感 query 剔除、控制字符清理、UTF-8 字节轮转、
+关闭时 drain / flush 和写失败结果。启动器验证主日志的终端/文件双写、追加、大小轮转和标准流恢复，
+并验证 `--access-log` 默认启用与 `false` 关闭，以及 `--max-connections`、
+`--max-inflight-request-bytes`、`--max-raw-ingress-bytes`、`--request-read-timeout`、
+`--request-body-timeout`、`--response-write-timeout` 参数解析；集成测试另验证真实 shaded JAR 启动和
+进程优雅终止日志。
 
 尚未覆盖的关键项包括 multipart、异步 dispatch、Servlet 非阻塞 ReadListener/WriteListener、
-error-page、安全约束、web-fragment、注解声明、URL 重写 Session、上传限额和 TCK。它们完成前
-不得宣称完整 Servlet 3.1 兼容。
+error-page、安全约束、web-fragment、注解声明、URL 重写 Session、上传限额和 TCK。当前响应仍全量堆缓冲，
+`WriteListener` / `isReady` 仍是兼容实现，不是真正的非阻塞写；它们完成前不得宣称完整 Servlet 3.1 兼容。
+
+现有 smoke 和 benchmark 结果只用于状态验证或预备对照；未达门槛前，不得把它们写成正式性能声明。

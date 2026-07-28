@@ -24,7 +24,7 @@ class ProbeWarIntegrationTest {
 
     @Test
     void startsWarAndServesFilterServletSessionAndStaticResource() throws Exception {
-        Path war = Paths.get("target", "probe-javax31.war").toAbsolutePath();
+        Path war = Paths.get(System.getProperty("tinysc.probe.war")).toAbsolutePath();
         ServerConfig config = ServerConfig.builder()
                 .port(0)
                 .contextPath("/probe")
@@ -48,6 +48,12 @@ class ProbeWarIntegrationTest {
             assertTrue(first.body.contains("name=Alice"));
             assertTrue(first.body.contains("session=1"));
             assertTrue(first.body.contains("thread=tinysc-worker-"));
+            assertTrue(first.body.contains("resourceJar=true"));
+            assertTrue(first.body.contains("resourceJarStream=true"));
+            assertTrue(first.body.contains("resourceJarPaths=true"));
+            assertTrue(first.body.contains("classesResource=false"));
+            assertTrue(first.body.contains("shadowedJarResource=false"));
+            assertTrue(first.body.contains("resourceJarRealPath=true"));
             assertNotNull(first.sessionCookie);
 
             Response second = get(port, "/probe/hello/world?name=Bob",
@@ -58,7 +64,71 @@ class ProbeWarIntegrationTest {
 
             Response staticPage = get(port, "/probe/", null);
             assertEquals(200, staticPage.status);
+            assertEquals("applied", staticPage.filterHeader);
             assertTrue(staticPage.body.contains("tinysc static resource ok"));
+            assertNotNull(staticPage.lastModified);
+
+            Response cachedStaticPage = request(port, "GET", "/probe/", null,
+                    "If-Modified-Since", staticPage.lastModified);
+            assertEquals(304, cachedStaticPage.status);
+            assertEquals("", cachedStaticPage.body);
+
+            Response forwardedStatic = get(port, "/probe/static-forward", null);
+            assertEquals(200, forwardedStatic.status);
+            assertEquals("applied", forwardedStatic.filterHeader);
+            assertEquals("applied", forwardedStatic.forwardFilterHeader);
+            assertTrue(forwardedStatic.body.contains("tinysc static resource ok"));
+
+            Response jarStatic = get(port, "/probe/jar-resource.html", null);
+            assertEquals(200, jarStatic.status);
+            assertEquals("applied", jarStatic.filterHeader);
+            assertTrue(jarStatic.body.contains("tinysc resource JAR ok"));
+            assertNotNull(jarStatic.lastModified);
+
+            Response cachedJarStatic = request(port, "GET",
+                    "/probe/jar-resource.html", null,
+                    "If-Modified-Since", jarStatic.lastModified);
+            assertEquals(304, cachedJarStatic.status);
+            assertEquals("", cachedJarStatic.body);
+
+            Response postedStaticTpl = request(port, "POST",
+                    "/probe/manual-declaration.tpl", null);
+            assertEquals(200, postedStaticTpl.status);
+            assertEquals("applied", postedStaticTpl.filterHeader);
+            assertTrue(postedStaticTpl.body.contains("tinysc filesystem tpl resource ok"));
+
+            Response conditionalPostedStaticTpl = request(port, "POST",
+                    "/probe/manual-declaration.tpl", null,
+                    "If-Modified-Since", staticPage.lastModified);
+            assertEquals(200, conditionalPostedStaticTpl.status);
+            assertTrue(conditionalPostedStaticTpl.body
+                    .contains("tinysc filesystem tpl resource ok"));
+
+            Response postedJarTpl = request(port, "POST",
+                    "/probe/jar-manual-declaration.tpl", null);
+            assertEquals(200, postedJarTpl.status);
+            assertEquals("applied", postedJarTpl.filterHeader);
+            assertTrue(postedJarTpl.body.contains("tinysc resource JAR tpl ok"));
+
+            assertEquals(404, request(port, "POST", "/probe/missing.tpl", null).status);
+            Response mappedPost = request(port, "POST", "/probe/hello/world", null);
+            assertEquals(405, mappedPost.status);
+            assertEquals("applied", mappedPost.filterHeader);
+
+            Response forwardedJarStatic = get(port, "/probe/jar-static-forward", null);
+            assertEquals(200, forwardedJarStatic.status);
+            assertEquals("applied", forwardedJarStatic.filterHeader);
+            assertEquals("applied", forwardedJarStatic.forwardFilterHeader);
+            assertTrue(forwardedJarStatic.body.contains("tinysc resource JAR ok"));
+
+            Response jarStaticHead = request(port, "HEAD", "/probe/jar-resource.html", null);
+            assertEquals(200, jarStaticHead.status);
+            assertEquals("", jarStaticHead.body);
+            assertTrue(Integer.parseInt(jarStaticHead.contentLength) > 0);
+
+            Response jarWelcome = get(port, "/probe/jar-dir/", null);
+            assertEquals(200, jarWelcome.status);
+            assertTrue(jarWelcome.body.contains("tinysc resource JAR welcome ok"));
 
             Response staticHead = request(port, "HEAD", "/probe/", null);
             assertEquals(200, staticHead.status);
@@ -90,6 +160,9 @@ class ProbeWarIntegrationTest {
             assertTrue(forwarded.body.contains("name=Forward"));
 
             assertEquals(404, get(port, "/probe/WEB-INF/web.xml", null).status);
+            assertEquals(404, get(port, "/probe/WEB-INF/jar-secret.txt", null).status);
+            assertEquals(404, get(port, "/probe/classes-only.html", null).status);
+            assertEquals(404, get(port, "/probe/jar-shadow/index.html", null).status);
             assertEquals(404, get(port, "/outside", null).status);
             assertTrue(server.readyMillis() >= 0L);
             assertTrue(server.prepareMillis() >= 0L);
@@ -102,6 +175,12 @@ class ProbeWarIntegrationTest {
 
     private static Response request(int port, String method, String path, String cookie)
             throws IOException {
+        return request(port, method, path, cookie, null, null);
+    }
+
+    private static Response request(int port, String method, String path, String cookie,
+                                    String headerName, String headerValue)
+            throws IOException {
         HttpURLConnection connection = (HttpURLConnection) new URL(
                 "http://127.0.0.1:" + port + path).openConnection();
         connection.setConnectTimeout(3000);
@@ -110,12 +189,17 @@ class ProbeWarIntegrationTest {
         if (cookie != null) {
             connection.setRequestProperty("Cookie", cookie);
         }
+        if (headerName != null) {
+            connection.setRequestProperty(headerName, headerValue);
+        }
         int status = connection.getResponseCode();
         InputStream input = status >= 400 ? connection.getErrorStream() : connection.getInputStream();
         String body = input == null ? "" : read(input);
         return new Response(status, body, connection.getHeaderField("X-TinySC-Filter"),
+                connection.getHeaderField("X-TinySC-Forward-Filter"),
                 connection.getHeaderField("Set-Cookie"),
-                connection.getHeaderField("Content-Length"));
+                connection.getHeaderField("Content-Length"),
+                connection.getHeaderField("Last-Modified"));
     }
 
     private static String read(InputStream input) throws IOException {
@@ -133,16 +217,21 @@ class ProbeWarIntegrationTest {
         private final int status;
         private final String body;
         private final String filterHeader;
+        private final String forwardFilterHeader;
         private final String sessionCookie;
         private final String contentLength;
+        private final String lastModified;
 
-        private Response(int status, String body, String filterHeader, String sessionCookie,
-                         String contentLength) {
+        private Response(int status, String body, String filterHeader,
+                         String forwardFilterHeader, String sessionCookie, String contentLength,
+                         String lastModified) {
             this.status = status;
             this.body = body;
             this.filterHeader = filterHeader;
+            this.forwardFilterHeader = forwardFilterHeader;
             this.sessionCookie = sessionCookie;
             this.contentLength = contentLength;
+            this.lastModified = lastModified;
         }
     }
 }

@@ -3,7 +3,9 @@ package io.tinysc.kernel;
 import java.io.ByteArrayInputStream;
 import java.io.InputStream;
 import java.net.InetSocketAddress;
+import java.nio.ByteBuffer;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.Collections;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -12,6 +14,9 @@ import java.util.Map;
 import java.util.Objects;
 
 public final class ContainerRequest {
+    private static final byte[] EMPTY_BODY = new byte[0];
+    private static final String[] EMPTY_HEADER_PAIRS = new String[0];
+    private static final InetSocketAddress DEFAULT_ADDRESS = new InetSocketAddress("127.0.0.1", 0);
     private final String method;
     private final String rawUri;
     private final String path;
@@ -22,8 +27,9 @@ public final class ContainerRequest {
     private final int serverPort;
     private final InetSocketAddress remoteAddress;
     private final InetSocketAddress localAddress;
-    private final Map<String, List<String>> headers;
+    private final String[] headerPairs;
     private final byte[] body;
+    private volatile Map<String, List<String>> headersView;
 
     private ContainerRequest(Builder builder) {
         method = requireText(builder.method, "method");
@@ -39,8 +45,11 @@ public final class ContainerRequest {
         serverPort = builder.serverPort;
         remoteAddress = Objects.requireNonNull(builder.remoteAddress, "remoteAddress");
         localAddress = Objects.requireNonNull(builder.localAddress, "localAddress");
-        headers = immutableHeaders(builder.headers);
-        body = builder.body == null ? new byte[0] : builder.body.clone();
+        int headerPairLength = builder.headerCount * 2;
+        headerPairs = headerPairLength == 0
+                ? EMPTY_HEADER_PAIRS
+                : Arrays.copyOf(builder.headerPairs, headerPairLength);
+        body = builder.body == null ? EMPTY_BODY : builder.body;
     }
 
     public String method() {
@@ -84,17 +93,50 @@ public final class ContainerRequest {
     }
 
     public Map<String, List<String>> headers() {
-        return headers;
+        Map<String, List<String>> result = headersView;
+        if (result == null) {
+            result = createHeadersView();
+            headersView = result;
+        }
+        return result;
     }
 
     public String firstHeader(String name) {
-        List<String> values = headers.get(normalizeHeaderName(name));
-        return values == null || values.isEmpty() ? null : values.get(0);
+        String requestedName = requireText(name, "header name");
+        for (int index = 0; index < headerPairs.length; index += 2) {
+            if (headerPairs[index].equalsIgnoreCase(requestedName)) {
+                return headerPairs[index + 1];
+            }
+        }
+        return null;
     }
 
     public List<String> headerValues(String name) {
-        List<String> values = headers.get(normalizeHeaderName(name));
-        return values == null ? Collections.<String>emptyList() : values;
+        String requestedName = requireText(name, "header name");
+        String firstValue = null;
+        List<String> values = null;
+        for (int index = 0; index < headerPairs.length; index += 2) {
+            if (!headerPairs[index].equalsIgnoreCase(requestedName)) {
+                continue;
+            }
+            String value = headerPairs[index + 1];
+            if (firstValue == null) {
+                firstValue = value;
+            } else {
+                if (values == null) {
+                    values = new ArrayList<String>(2);
+                    values.add(firstValue);
+                }
+                values.add(value);
+            }
+        }
+        if (firstValue == null) {
+            return Collections.emptyList();
+        }
+        if (values == null) {
+            return Collections.singletonList(firstValue);
+        }
+        return Collections.unmodifiableList(values);
     }
 
     public int bodyLength() {
@@ -102,7 +144,7 @@ public final class ContainerRequest {
     }
 
     public byte[] bodyBytes() {
-        return body.clone();
+        return body.length == 0 ? EMPTY_BODY : body.clone();
     }
 
     public InputStream bodyStream() {
@@ -113,19 +155,27 @@ public final class ContainerRequest {
         return new Builder();
     }
 
-    private static Map<String, List<String>> immutableHeaders(Map<String, List<String>> source) {
+    private Map<String, List<String>> createHeadersView() {
+        if (headerPairs.length == 0) {
+            return Collections.emptyMap();
+        }
         Map<String, List<String>> copy = new LinkedHashMap<String, List<String>>();
-        for (Map.Entry<String, List<String>> entry : source.entrySet()) {
-            String name = normalizeHeaderName(entry.getKey());
+        for (int index = 0; index < headerPairs.length; index += 2) {
+            String name = normalizeHeaderName(headerPairs[index]);
             List<String> values = copy.get(name);
             if (values == null) {
-                values = new ArrayList<String>();
+                values = new ArrayList<String>(1);
                 copy.put(name, values);
             }
-            values.addAll(entry.getValue());
+            values.add(headerPairs[index + 1]);
         }
         for (Map.Entry<String, List<String>> entry : copy.entrySet()) {
-            entry.setValue(Collections.unmodifiableList(new ArrayList<String>(entry.getValue())));
+            List<String> values = entry.getValue();
+            if (values.size() == 1) {
+                entry.setValue(Collections.singletonList(values.get(0)));
+            } else {
+                entry.setValue(Collections.unmodifiableList(values));
+            }
         }
         return Collections.unmodifiableMap(copy);
     }
@@ -150,9 +200,10 @@ public final class ContainerRequest {
         private String scheme = "http";
         private String serverName = "localhost";
         private int serverPort = 80;
-        private InetSocketAddress remoteAddress = new InetSocketAddress("127.0.0.1", 0);
-        private InetSocketAddress localAddress = new InetSocketAddress("127.0.0.1", 0);
-        private final Map<String, List<String>> headers = new LinkedHashMap<String, List<String>>();
+        private InetSocketAddress remoteAddress = DEFAULT_ADDRESS;
+        private InetSocketAddress localAddress = DEFAULT_ADDRESS;
+        private String[] headerPairs = EMPTY_HEADER_PAIRS;
+        private int headerCount;
         private byte[] body;
 
         private Builder() {
@@ -209,18 +260,57 @@ public final class ContainerRequest {
         }
 
         public Builder addHeader(String name, String value) {
-            String normalized = normalizeHeaderName(name);
-            List<String> values = headers.get(normalized);
-            if (values == null) {
-                values = new ArrayList<String>();
-                headers.put(normalized, values);
+            String checkedName = requireText(name, "header name");
+            String checkedValue = Objects.requireNonNull(value, "header value");
+            int offset = headerCount * 2;
+            if (offset == headerPairs.length) {
+                int newLength = headerPairs.length == 0 ? 8 : headerPairs.length * 2;
+                headerPairs = Arrays.copyOf(headerPairs, newLength);
             }
-            values.add(Objects.requireNonNull(value, "header value"));
+            headerPairs[offset] = checkedName;
+            headerPairs[offset + 1] = checkedValue;
+            headerCount++;
             return this;
         }
 
         public Builder body(byte[] value) {
-            body = value == null ? null : value.clone();
+            if (value == null) {
+                body = null;
+            } else if (value.length == 0) {
+                body = EMPTY_BODY;
+            } else {
+                body = value.clone();
+            }
+            return this;
+        }
+
+        public Builder bodyBuffers(ByteBuffer[] values) {
+            if (values == null) {
+                body = null;
+                return this;
+            }
+            long length = 0L;
+            for (ByteBuffer value : values) {
+                if (value == null) {
+                    throw new IllegalArgumentException("body buffer must not be null");
+                }
+                length += value.remaining();
+                if (length > Integer.MAX_VALUE) {
+                    throw new IllegalArgumentException("body is too large");
+                }
+            }
+            if (length == 0L) {
+                body = EMPTY_BODY;
+                return this;
+            }
+            body = new byte[(int) length];
+            int offset = 0;
+            for (ByteBuffer value : values) {
+                ByteBuffer source = value.duplicate();
+                int remaining = source.remaining();
+                source.get(body, offset, remaining);
+                offset += remaining;
+            }
             return this;
         }
 

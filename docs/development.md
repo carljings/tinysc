@@ -37,6 +37,10 @@ mvn clean verify
 仓库的 `.mvn/maven.config` 只对 tinysc 生效，并使用不含凭据的项目级 settings 从 Maven
 Central 获取开源依赖；不会修改或复用业务项目的私有 Nexus 凭据。
 
+公开仓库的 `.github/workflows/ci.yml` 会在 pull request 以及 `main` / `1.x` 推送时，使用
+Temurin JDK 8 执行同一条 `mvn -B -ntp clean verify` 门禁。workflow 只授予源码读取权限，
+同一分支的新运行会取消旧运行；失败时保留 7 天 Surefire 报告用于定位。
+
 只构建某模块及其依赖：
 
 ```bash
