@@ -1,5 +1,7 @@
 # tinysc
 
+[![Java 8 CI](https://github.com/carljings/tinysc/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/carljings/tinysc/actions/workflows/ci.yml)
+
 tinysc 是一个面向单 WAR 部署的轻量 Servlet 容器。
 
 当前开发线是 `1.x Classic`：Java 8、Servlet 3.1、`javax.servlet`。`2.x Modern`
