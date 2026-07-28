@@ -49,6 +49,20 @@
     </servlet-mapping>
 
     <servlet>
+        <servlet-name>uploadProbeServlet</servlet-name>
+        <servlet-class>example.tinysc.probe.UploadProbeServlet</servlet-class>
+        <multipart-config>
+            <max-file-size>64</max-file-size>
+            <max-request-size>1024</max-request-size>
+            <file-size-threshold>0</file-size-threshold>
+        </multipart-config>
+    </servlet>
+    <servlet-mapping>
+        <servlet-name>uploadProbeServlet</servlet-name>
+        <url-pattern>/upload</url-pattern>
+    </servlet-mapping>
+
+    <servlet>
         <servlet-name>benchmarkServlet</servlet-name>
         <servlet-class>example.tinysc.probe.BenchmarkServlet</servlet-class>
         <load-on-startup>2</load-on-startup>

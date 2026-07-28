@@ -13,5 +13,6 @@
 | [0009](0009-bounded-elastic-worker-pool.md) | Accepted | 有界弹性工作线程池 |
 | [0010](0010-bounded-request-admission.md) | Accepted | 有界请求准入 |
 | [0011](0011-raw-ingress-and-transport-deadlines.md) | Accepted | 原始入站预算与传输时限 |
+| [0012](0012-bounded-multipart-parsing.md) | Accepted | 有界 multipart 解析 |
 
 编号一旦发布不得复用。决策被替代时保留原文件并标记 Superseded。

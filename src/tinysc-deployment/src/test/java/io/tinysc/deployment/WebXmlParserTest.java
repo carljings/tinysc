@@ -56,6 +56,64 @@ class WebXmlParserTest {
     }
 
     @Test
+    void parsesCompleteMultipartConfig() throws Exception {
+        String xml = "<web-app xmlns=\"http://xmlns.jcp.org/xml/ns/javaee\" version=\"3.1\">"
+                + "<servlet><servlet-name>upload</servlet-name>"
+                + "<servlet-class>example.UploadServlet</servlet-class>"
+                + "<multipart-config><location>/var/tmp/uploads</location>"
+                + "<max-file-size>1048576</max-file-size>"
+                + "<max-request-size>2097152</max-request-size>"
+                + "<file-size-threshold>4096</file-size-threshold>"
+                + "</multipart-config></servlet></web-app>";
+
+        WebAppDescriptor descriptor = parser.parse(stream(xml), "multipart-complete.xml");
+        WebAppDescriptor.MultipartConfigDefinition multipart =
+                descriptor.servlets().get("upload").multipartConfig();
+
+        assertEquals("/var/tmp/uploads", multipart.location());
+        assertEquals(1048576L, multipart.maxFileSize());
+        assertEquals(2097152L, multipart.maxRequestSize());
+        assertEquals(4096, multipart.fileSizeThreshold());
+    }
+
+    @Test
+    void appliesMultipartConfigDefaults() throws Exception {
+        String xml = "<web-app xmlns=\"http://xmlns.jcp.org/xml/ns/javaee\" version=\"3.1\">"
+                + "<servlet><servlet-name>upload</servlet-name>"
+                + "<servlet-class>example.UploadServlet</servlet-class>"
+                + "<multipart-config/></servlet></web-app>";
+
+        WebAppDescriptor descriptor = parser.parse(stream(xml), "multipart-defaults.xml");
+        WebAppDescriptor.MultipartConfigDefinition multipart =
+                descriptor.servlets().get("upload").multipartConfig();
+
+        assertEquals("", multipart.location());
+        assertEquals(-1L, multipart.maxFileSize());
+        assertEquals(-1L, multipart.maxRequestSize());
+        assertEquals(0, multipart.fileSizeThreshold());
+    }
+
+    @Test
+    void rejectsInvalidMultipartConfigLimits() {
+        String[] invalidConfigs = {
+                "<max-file-size>-2</max-file-size>",
+                "<max-request-size>-2</max-request-size>",
+                "<file-size-threshold>-1</file-size-threshold>"
+        };
+
+        for (String invalidConfig : invalidConfigs) {
+            String xml = "<web-app xmlns=\"http://xmlns.jcp.org/xml/ns/javaee\" version=\"3.1\">"
+                    + "<servlet><servlet-name>upload</servlet-name>"
+                    + "<servlet-class>example.UploadServlet</servlet-class>"
+                    + "<multipart-config>" + invalidConfig + "</multipart-config>"
+                    + "</servlet></web-app>";
+
+            assertThrows(DeploymentException.class,
+                    () -> parser.parse(stream(xml), "multipart-invalid.xml"));
+        }
+    }
+
+    @Test
     void rejectsDoctypeAndExternalEntities() {
         String xml = "<?xml version=\"1.0\"?>"
                 + "<!DOCTYPE web-app [<!ENTITY xxe SYSTEM \"file:///etc/passwd\">]>"

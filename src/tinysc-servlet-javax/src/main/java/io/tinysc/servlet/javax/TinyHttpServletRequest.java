@@ -5,6 +5,7 @@ import io.tinysc.kernel.ContainerExchange;
 
 import javax.servlet.AsyncContext;
 import javax.servlet.DispatcherType;
+import javax.servlet.MultipartConfigElement;
 import javax.servlet.ReadListener;
 import javax.servlet.RequestDispatcher;
 import javax.servlet.ServletContext;
@@ -49,6 +50,7 @@ final class TinyHttpServletRequest implements HttpServletRequest {
     private String requestPath;
     private final boolean asyncSupported;
     private final ScheduledExecutorService asyncScheduler;
+    private final MultipartConfigElement multipartConfig;
     private Map<String, Object> attributes;
     private String characterEncoding = "ISO-8859-1";
     private String currentQuery;
@@ -63,10 +65,23 @@ final class TinyHttpServletRequest implements HttpServletRequest {
     private boolean requestedSessionIdFromCookie;
     private TinyHttpSession session;
     private TinyAsyncContext asyncContext;
+    private List<TinyPart> multipartParts;
+    private Collection<Part> multipartPartsView;
+    private Throwable multipartFailure;
+    private boolean multipartParsed;
 
     TinyHttpServletRequest(ContainerExchange exchange, TinyHttpServletResponse response,
                            TinyServletContext context, TinySessionManager sessions,
                            ServletMappingResult mapping, String requestPath,
+                           boolean asyncSupported, ScheduledExecutorService asyncScheduler) {
+        this(exchange, response, context, sessions, mapping, requestPath, null,
+                asyncSupported, asyncScheduler);
+    }
+
+    TinyHttpServletRequest(ContainerExchange exchange, TinyHttpServletResponse response,
+                           TinyServletContext context, TinySessionManager sessions,
+                           ServletMappingResult mapping, String requestPath,
+                           MultipartConfigElement multipartConfig,
                            boolean asyncSupported, ScheduledExecutorService asyncScheduler) {
         this.exchange = exchange;
         this.request = exchange.request();
@@ -76,6 +91,7 @@ final class TinyHttpServletRequest implements HttpServletRequest {
         this.mapping = mapping;
         this.requestPath = requestPath;
         currentQuery = request.query();
+        this.multipartConfig = multipartConfig;
         this.asyncSupported = asyncSupported;
         this.asyncScheduler = asyncScheduler;
     }
@@ -265,13 +281,19 @@ final class TinyHttpServletRequest implements HttpServletRequest {
     }
 
     @Override
-    public Collection<Part> getParts() throws ServletException {
-        throw new ServletException("multipart processing is not configured");
+    public Collection<Part> getParts() throws IOException, ServletException {
+        multipartParts();
+        return multipartPartsView;
     }
 
     @Override
-    public Part getPart(String name) throws ServletException {
-        throw new ServletException("multipart processing is not configured");
+    public Part getPart(String name) throws IOException, ServletException {
+        for (TinyPart part : multipartParts()) {
+            if (part.getName().equals(name)) {
+                return part;
+            }
+        }
+        return null;
     }
 
     @Override
@@ -543,8 +565,12 @@ final class TinyHttpServletRequest implements HttpServletRequest {
     }
 
     void endRequest() {
-        if (session != null) {
-            session.endAccess();
+        try {
+            if (session != null) {
+                session.endAccess();
+            }
+        } finally {
+            deleteMultipartParts();
         }
     }
 
@@ -591,6 +617,9 @@ final class TinyHttpServletRequest implements HttpServletRequest {
                 parseParameterString(new String(request.bodyBytes(), Charset.forName(characterEncoding)),
                         characterEncoding, values);
             }
+            if (MultipartParser.isMultipart(request)) {
+                addMultipartParameters(values);
+            }
             Map<String, String[]> built = new LinkedHashMap<String, String[]>();
             for (Map.Entry<String, List<String>> entry : values.entrySet()) {
                 built.put(entry.getKey(), entry.getValue().toArray(new String[entry.getValue().size()]));
@@ -598,6 +627,23 @@ final class TinyHttpServletRequest implements HttpServletRequest {
             parameters = Collections.unmodifiableMap(built);
         }
         return parameters;
+    }
+
+    private void addMultipartParameters(Map<String, List<String>> target) {
+        if (multipartConfig == null) {
+            return;
+        }
+        try {
+            for (TinyPart part : multipartParts()) {
+                if (part.isFormField()) {
+                    addParameter(target, part.getName(), part.stringValue(characterEncoding));
+                }
+            }
+        } catch (IOException failure) {
+            throw new IllegalStateException("cannot parse multipart request parameters", failure);
+        } catch (ServletException failure) {
+            throw new IllegalStateException("cannot parse multipart request parameters", failure);
+        }
     }
 
     private static void parseParameterString(String value, String encoding,
@@ -612,16 +658,73 @@ final class TinyHttpServletRequest implements HttpServletRequest {
             try {
                 String name = URLDecoder.decode(rawName, encoding);
                 String decoded = URLDecoder.decode(rawValue, encoding);
-                List<String> values = target.get(name);
-                if (values == null) {
-                    values = new ArrayList<String>();
-                    target.put(name, values);
-                }
-                values.add(decoded);
+                addParameter(target, name, decoded);
             } catch (UnsupportedEncodingException impossible) {
                 throw new IllegalArgumentException(impossible);
             }
         }
+    }
+
+    private static void addParameter(Map<String, List<String>> target,
+                                     String name, String value) {
+        List<String> values = target.get(name);
+        if (values == null) {
+            values = new ArrayList<String>();
+            target.put(name, values);
+        }
+        values.add(value);
+    }
+
+    private List<TinyPart> multipartParts() throws IOException, ServletException {
+        if (!multipartParsed) {
+            multipartParsed = true;
+            try {
+                if (multipartConfig == null) {
+                    throw new IllegalStateException(
+                            "multipart processing is not configured for this servlet");
+                }
+                multipartParts = MultipartParser.parse(
+                        request, multipartConfig, context.tempDirectory(), characterEncoding);
+                List<Part> view = new ArrayList<Part>(multipartParts.size());
+                view.addAll(multipartParts);
+                multipartPartsView = Collections.unmodifiableList(view);
+            } catch (IOException failure) {
+                multipartFailure = failure;
+            } catch (ServletException failure) {
+                multipartFailure = failure;
+            } catch (RuntimeException failure) {
+                multipartFailure = failure;
+            }
+        }
+        rethrowMultipartFailure();
+        return multipartParts;
+    }
+
+    private void rethrowMultipartFailure() throws IOException, ServletException {
+        if (multipartFailure instanceof IOException) {
+            throw (IOException) multipartFailure;
+        }
+        if (multipartFailure instanceof ServletException) {
+            throw (ServletException) multipartFailure;
+        }
+        if (multipartFailure instanceof RuntimeException) {
+            throw (RuntimeException) multipartFailure;
+        }
+    }
+
+    private void deleteMultipartParts() {
+        if (multipartParts == null) {
+            return;
+        }
+        for (TinyPart part : multipartParts) {
+            try {
+                part.delete();
+            } catch (IOException failure) {
+                context.log("Cannot remove multipart temporary file", failure);
+            }
+        }
+        multipartParts = null;
+        multipartPartsView = null;
     }
 
     private String findRequestedSessionId() {

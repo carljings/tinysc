@@ -8,6 +8,7 @@ import org.junit.jupiter.api.io.TempDir;
 import java.io.ByteArrayOutputStream;
 import java.io.IOException;
 import java.io.InputStream;
+import java.io.OutputStream;
 import java.net.HttpURLConnection;
 import java.net.URL;
 import java.nio.charset.StandardCharsets;
@@ -115,6 +116,17 @@ class ProbeWarIntegrationTest {
             assertEquals(405, mappedPost.status);
             assertEquals("applied", mappedPost.filterHeader);
 
+            Response upload = multipart(port, "/probe/upload", "probe-boundary",
+                    "title", "monthly", "document", "plan.txt", "text/plain", "content");
+            assertEquals(200, upload.status);
+            assertEquals("applied", upload.filterHeader);
+            assertEquals("title=monthly;file=plan.txt;size=7;"
+                    + "type=text/plain;payload=content", upload.body);
+
+            Response oversizedUpload = multipart(port, "/probe/upload", "limit-boundary",
+                    "title", "monthly", "document", "large.txt", "text/plain", repeat('x', 65));
+            assertEquals(500, oversizedUpload.status);
+
             Response forwardedJarStatic = get(port, "/probe/jar-static-forward", null);
             assertEquals(200, forwardedJarStatic.status);
             assertEquals("applied", forwardedJarStatic.filterHeader);
@@ -200,6 +212,50 @@ class ProbeWarIntegrationTest {
                 connection.getHeaderField("Set-Cookie"),
                 connection.getHeaderField("Content-Length"),
                 connection.getHeaderField("Last-Modified"));
+    }
+
+    private static Response multipart(
+            int port, String path, String boundary,
+            String fieldName, String fieldValue,
+            String fileField, String fileName, String contentType, String fileValue)
+            throws IOException {
+        String body = "--" + boundary + "\r\n"
+                + "Content-Disposition: form-data; name=\"" + fieldName + "\"\r\n\r\n"
+                + fieldValue + "\r\n"
+                + "--" + boundary + "\r\n"
+                + "Content-Disposition: form-data; name=\"" + fileField
+                + "\"; filename=\"" + fileName + "\"\r\n"
+                + "Content-Type: " + contentType + "\r\n\r\n"
+                + fileValue + "\r\n"
+                + "--" + boundary + "--\r\n";
+        byte[] bytes = body.getBytes(StandardCharsets.UTF_8);
+        HttpURLConnection connection = (HttpURLConnection) new URL(
+                "http://127.0.0.1:" + port + path).openConnection();
+        connection.setConnectTimeout(3000);
+        connection.setReadTimeout(3000);
+        connection.setRequestMethod("POST");
+        connection.setRequestProperty(
+                "Content-Type", "multipart/form-data; boundary=\"" + boundary + "\"");
+        connection.setFixedLengthStreamingMode(bytes.length);
+        connection.setDoOutput(true);
+        try (OutputStream output = connection.getOutputStream()) {
+            output.write(bytes);
+        }
+        int status = connection.getResponseCode();
+        InputStream input = status >= 400 ? connection.getErrorStream() : connection.getInputStream();
+        String responseBody = input == null ? "" : read(input);
+        return new Response(status, responseBody,
+                connection.getHeaderField("X-TinySC-Filter"),
+                connection.getHeaderField("X-TinySC-Forward-Filter"),
+                connection.getHeaderField("Set-Cookie"),
+                connection.getHeaderField("Content-Length"),
+                connection.getHeaderField("Last-Modified"));
+    }
+
+    private static String repeat(char value, int count) {
+        char[] result = new char[count];
+        java.util.Arrays.fill(result, value);
+        return new String(result);
     }
 
     private static String read(InputStream input) throws IOException {

@@ -124,7 +124,8 @@ public final class WebXmlParser {
                     optionalText(element, "jsp-file"),
                     initParams(element),
                     loadOnStartup,
-                    booleanText(element, "async-supported", false)));
+                    booleanText(element, "async-supported", false),
+                    multipartConfig(element)));
         }
         for (Element element : children(root, "servlet-mapping")) {
             result.servletMapping(new WebAppDescriptor.ServletMapping(
@@ -144,6 +145,22 @@ public final class WebXmlParser {
             }
         }
         return result.build();
+    }
+
+    private static WebAppDescriptor.MultipartConfigDefinition multipartConfig(Element servlet) {
+        List<Element> configurations = children(servlet, "multipart-config");
+        if (configurations.isEmpty()) {
+            return null;
+        }
+        Element configuration = configurations.get(0);
+        String maxFileSize = optionalText(configuration, "max-file-size");
+        String maxRequestSize = optionalText(configuration, "max-request-size");
+        String fileSizeThreshold = optionalText(configuration, "file-size-threshold");
+        return new WebAppDescriptor.MultipartConfigDefinition(
+                textOrEmpty(configuration, "location"),
+                maxFileSize == null ? -1L : Long.parseLong(maxFileSize),
+                maxRequestSize == null ? -1L : Long.parseLong(maxRequestSize),
+                fileSizeThreshold == null ? 0 : Integer.parseInt(fileSizeThreshold));
     }
 
     private static Map<String, String> initParams(Element parent) {

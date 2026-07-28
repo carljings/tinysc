@@ -11,6 +11,8 @@ Known limitations；提交历史不能替代发布说明。
 - Netty HTTP/1.1 connector、有界 worker、严格请求校验、事务式端口开放，以及连接/请求/字节/原始入站容量和传输时限控制。
 - WAR 检查、安全展开、SHA-256 缓存、`web.xml` 解析和 WebApp 类加载器。
 - Servlet、Filter、Listener、SCI、Session、基础 Async 与 RequestDispatcher 链路。
+- 有界 multipart 基线：支持 `web.xml` 与 SCI 动态配置、`Part`、普通字段参数合并、文件/请求/Part
+  Header 限额、磁盘阈值和请求结束清理；解析器直接读取现有请求流，避免额外复制完整 body。
 - `tinysc inspect` namespace/bytecode 建议与 `tinysc start` 启动命令。
 - Probe WAR 端到端测试、Tomcat 同机基准脚本及两个真实 WAR 的分阶段验收报告。
 - shaded launcher 的 Java 8 class-major 与 1.x namespace 自动发布门禁。
@@ -64,7 +66,11 @@ Known limitations；提交历史不能替代发布说明。
 
 ### Verification
 
-- Java 8 `mvn -B -ntp clean verify` 共 157 项测试通过。
+- 当前分支在 Java 8 下执行 `mvn -B -ntp clean verify`，共 175 项测试通过。
+- 同一 Probe WAR 在 TinySC 与 Tomcat 8.5.100 上的 multipart 成功上传均返回相同 `200` 响应体，
+  65-byte 文件超过 64-byte 配置上限时均返回 `500`；证据见
+  [multipart Probe WAR 差分验收](acceptance/2026-07-28-multipart-probe-differential.md)。
+- 2026-07-22 最终候选的性能对照仍对应当时的 157 项测试，尚未将 multipart 基线纳入重测。
 - 最终候选在并发 32/128 下各完成 5 个独立进程的同机同参交替对照，两组均 0 失败；吞吐分别为
   Tomcat 的 93.77% 和 91.01%。它只满足当前可回滚切换的 90% 安全门槛，仍未满足 1.0 的吞吐
   持平和 RSS 低 30% 门槛；完整数据见
@@ -75,8 +81,8 @@ Known limitations；提交历史不能替代发布说明。
 
 ### Known limitations
 
-- 尚未完成 multipart、异步 dispatch、Servlet 非阻塞 ReadListener/WriteListener、真正流式响应写、
-  error-page、安全约束、web-fragment、注解声明和 TCK。
+- 尚未完成 `@MultipartConfig` 注解声明合并、流式上传、异步 dispatch、Servlet 非阻塞
+  ReadListener/WriteListener、真正流式响应写、error-page、安全约束、web-fragment、其他注解声明和 TCK。
 - HTTPS、HTTP/2、健康端点、配置文件和生产长稳门禁尚未完成。
 - 10 分钟 soak 未完整保存线程/FD 漂移汇总，1 小时和 24 小时长稳仍未执行。
 - Legacy WAR A 仍被外部数据库连接超时阻断；Legacy WAR B 只完成报告所列关键路径 L2，上传、

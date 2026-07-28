@@ -194,7 +194,9 @@ public final class JavaxServletRuntime implements WebAppRuntime {
             boolean asyncSupported = mappedServlet != null && mappedServlet.asyncSupported
                     && selection.asyncSupported;
             request = new TinyHttpServletRequest(exchange, response, servletContext,
-                    sessionManager, mapping, requestPath, asyncSupported, asyncScheduler);
+                    sessionManager, mapping, requestPath,
+                    mappedServlet == null ? null : mappedServlet.multipartConfig,
+                    asyncSupported, asyncScheduler);
             fireRequestInitialized(request);
             Servlet servlet = mapping == null ? staticResourceServlet : mappedServlet.get();
             new ApplicationFilterChain(selection.filters, servlet).doFilter(request, response);
@@ -1024,6 +1026,13 @@ public final class JavaxServletRuntime implements WebAppRuntime {
             initParameters.putAll(definition.initParams());
             loadOnStartup = definition.loadOnStartup();
             asyncSupported = definition.asyncSupported();
+            WebAppDescriptor.MultipartConfigDefinition configured =
+                    definition.multipartConfig();
+            if (configured != null) {
+                multipartConfig = new MultipartConfigElement(
+                        configured.location(), configured.maxFileSize(),
+                        configured.maxRequestSize(), configured.fileSizeThreshold());
+            }
         }
 
         private ServletHolder(String name, String className) {
@@ -1213,6 +1222,9 @@ public final class JavaxServletRuntime implements WebAppRuntime {
 
         @Override
         public void setMultipartConfig(MultipartConfigElement config) {
+            if (config == null) {
+                throw new IllegalArgumentException("multipart config must not be null");
+            }
             holder.multipartConfig = config;
         }
 

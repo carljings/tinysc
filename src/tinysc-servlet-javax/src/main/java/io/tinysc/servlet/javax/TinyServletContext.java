@@ -77,6 +77,10 @@ final class TinyServletContext implements ServletContext, AutoCloseable {
         return contextPath;
     }
 
+    Path tempDirectory() {
+        return tempDirectory;
+    }
+
     @Override
     public ServletContext getContext(String uriPath) {
         return contextPath.equals(uriPath) ? this : null;
