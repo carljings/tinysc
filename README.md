@@ -45,7 +45,9 @@ java -jar src/tinysc-launcher/target/tinysc-1.0.0-alpha-SNAPSHOT.jar \
 ## 当前证据
 
 tinysc 用单进程单 WAR、事务式就绪、SHA-256 展开缓存和精简线程模型换取更短、更可预测的
-启动链。最终候选已在 Java 8 下通过 `mvn -B -ntp clean verify`，共 157 项测试。Probe WAR 在
+启动链。当前分支已在 Java 8 下通过 `mvn -B -ntp clean verify`，共 175 项测试。下方 Probe WAR
+性能数据仍来自 2026-07-22 最终候选（当时为 157 项测试），尚未包含 multipart 基线的重新测量。
+该候选在
 同机同参、每个并发等级 5 个独立进程且交替容器顺序的中位数如下；成对数据均为
 “tinysc / Tomcat 8.5.100”：
 

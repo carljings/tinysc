@@ -62,8 +62,15 @@ Web 根优先级、`WEB-INF` 保护以及 context
 `--request-body-timeout`、`--response-write-timeout` 参数解析；集成测试另验证真实 shaded JAR 启动和
 进程优雅终止日志。
 
-尚未覆盖的关键项包括 multipart、异步 dispatch、Servlet 非阻塞 ReadListener/WriteListener、
-error-page、安全约束、web-fragment、注解声明、URL 重写 Session、上传限额和 TCK。当前响应仍全量堆缓冲，
+multipart 基线测试覆盖 `web.xml` / SCI 动态配置、文本字段与二进制文件、quoted boundary、重复字段、
+Part Header、`getPart(s)`、表单参数合并、请求/文件/Part 数/Header 限额、磁盘阈值、`write/delete`、
+路径逃逸拒绝和同步/Async 请求结束清理；Probe WAR 另走真实 Netty HTTP 上传，并已用同一 WAR
+对 Tomcat 8.5.100 完成成功响应与超限状态码差分，证据见
+[multipart Probe WAR 差分验收](acceptance/2026-07-28-multipart-probe-differential.md)。
+
+尚未覆盖的关键项包括 `@MultipartConfig` 注解声明合并、流式上传、异步 dispatch、Servlet 非阻塞
+ReadListener/WriteListener、error-page、安全约束、web-fragment、其他注解声明、URL 重写 Session 和
+TCK。当前响应仍全量堆缓冲，
 `WriteListener` / `isReady` 仍是兼容实现，不是真正的非阻塞写；它们完成前不得宣称完整 Servlet 3.1 兼容。
 
 现有 smoke 和 benchmark 结果只用于状态验证或预备对照；未达门槛前，不得把它们写成正式性能声明。

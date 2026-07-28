@@ -5,6 +5,7 @@ import io.tinysc.deployment.WarDeploymentManager;
 import io.tinysc.kernel.ContainerExchange;
 import io.tinysc.kernel.ContainerRequest;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.function.Executable;
 import org.junit.jupiter.api.io.TempDir;
 
 import javax.servlet.ServletRequestAttributeEvent;
@@ -25,6 +26,7 @@ import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNotSame;
 import static org.junit.jupiter.api.Assertions.assertNull;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class TinyHttpServletRequestTest {
@@ -148,6 +150,26 @@ class TinyHttpServletRequestTest {
                     RuntimeFixture.field(fixture.runtime, "requestAttributeListeners",
                             ServletRequestAttributeListener[].class);
             assertEquals(0, listeners.length);
+        }
+    }
+
+    @Test
+    void rejectsMultipartAccessWithoutServletConfiguration() throws Exception {
+        try (RuntimeFixture fixture = RuntimeFixture.open(temporaryDirectory)) {
+            final TinyHttpServletRequest request = fixture.request(requestBuilder()
+                    .method("POST")
+                    .addHeader("Content-Type", "multipart/form-data; boundary=missing-config")
+                    .build());
+
+            assertNull(request.getParameter("field"));
+            IllegalStateException failure = assertThrows(IllegalStateException.class,
+                    new Executable() {
+                        @Override
+                        public void execute() throws Throwable {
+                            request.getParts();
+                        }
+                    });
+            assertTrue(failure.getMessage().contains("not configured"));
         }
     }
 

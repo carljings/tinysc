@@ -73,6 +73,8 @@ worker 调度规则如下：
 | HTTP 请求行 | 8 KiB |
 | HTTP Header | 16 KiB |
 | 聚合请求体 | 16 MiB |
+| multipart Part 数 | 50 / 请求 |
+| multipart 单 Part Header | 512 bytes |
 | Listen backlog | 256 |
 | 优雅停止等待 | 30 秒 |
 
@@ -83,7 +85,11 @@ chunked 按实际分片累计，断开、超时或失败都会精确释放已占
 只覆盖读取/解析和 keep-alive 空闲阶段，不会中断 Servlet/Async 执行；`--request-body-timeout` 只管请求体总时限，
 没有更早响应在途时超时返回 `408` 并关闭连接；`--response-write-timeout` 只在写不完成时关闭连接，是 transport guardrail，
 不是响应堆内存上限或完整背压。当前 response 仍全量堆缓冲，Servlet `WriteListener` / `isReady`
-还不是 true non-blocking write。multipart、流式上传和 Servlet 非阻塞 I/O 尚未完成；大文件场景不能以调大上限代替流式实现。
+还不是 true non-blocking write。配置了 `<multipart-config>` 或 SCI 动态 multipart 配置的 Servlet
+可以使用 `getPart(s)`；`max-request-size`、`max-file-size` 和 `file-size-threshold` 会生效，但全局
+16 MiB 聚合上限仍优先，且当前最多 50 个 Part、每个 Part Header 最多 512 bytes。该能力仍不是流式
+上传。`<location>` 相对路径以 ServletContext 临时目录为基准且不得逃逸，绝对路径由部署者负责；
+`@MultipartConfig` 注解声明合并和 Servlet 非阻塞 I/O 尚未完成；大文件场景不能以调大上限代替流式实现。
 同一 HTTP/1.1 channel 上后续 pipelined 请求会按顺序等待当前响应 flush 完成，raw、解码、聚合或 Expect 失败不会抢占正在执行的
 exchange，也不会提前发出 `100 Continue`；为保持响应顺序，后续失败不另行插入错误响应。当前只有全局 raw ingress 预算和单请求体上限，
 没有独立的每连接公平份额；单连接可以占用全局预算，但不能突破全局硬边界。

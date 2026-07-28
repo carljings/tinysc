@@ -34,6 +34,8 @@
         <servlet-api.version>3.1.0</servlet-api.version>
         <asm.version>9.8</asm.version>
         <commons-compress.version>1.28.0</commons-compress.version>
+        <commons-fileupload.version>1.6.0</commons-fileupload.version>
+        <commons-io.version>2.20.0</commons-io.version>
         <junit.version>5.12.2</junit.version>
         <compiler-plugin.version>3.14.1</compiler-plugin.version>
         <surefire-plugin.version>3.5.3</surefire-plugin.version>
@@ -63,6 +65,16 @@
                 <groupId>org.apache.commons</groupId>
                 <artifactId>commons-compress</artifactId>
                 <version>${commons-compress.version}</version>
+            </dependency>
+            <dependency>
+                <groupId>commons-fileupload</groupId>
+                <artifactId>commons-fileupload</artifactId>
+                <version>${commons-fileupload.version}</version>
+            </dependency>
+            <dependency>
+                <groupId>commons-io</groupId>
+                <artifactId>commons-io</artifactId>
+                <version>${commons-io.version}</version>
             </dependency>
             <dependency>
                 <groupId>org.junit</groupId>

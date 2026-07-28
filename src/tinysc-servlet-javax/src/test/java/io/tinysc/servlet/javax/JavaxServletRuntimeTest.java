@@ -9,11 +9,13 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.function.Executable;
 import org.junit.jupiter.api.io.TempDir;
 
+import javax.servlet.AsyncContext;
 import javax.servlet.DispatcherType;
 import javax.servlet.Filter;
 import javax.servlet.FilterChain;
 import javax.servlet.FilterConfig;
 import javax.servlet.FilterRegistration;
+import javax.servlet.MultipartConfigElement;
 import javax.servlet.ServletException;
 import javax.servlet.ServletRegistration;
 import javax.servlet.ServletRequest;
@@ -23,8 +25,11 @@ import javax.servlet.ServletResponse;
 import javax.servlet.http.HttpServlet;
 import javax.servlet.http.HttpServletRequest;
 import javax.servlet.http.HttpServletResponse;
-import java.lang.reflect.Field;
+import javax.servlet.http.Part;
 import java.io.IOException;
+import java.io.PrintWriter;
+import java.lang.reflect.Field;
+import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.time.Duration;
@@ -311,11 +316,121 @@ class JavaxServletRuntimeTest {
         }
     }
 
+    @Test
+    void appliesDynamicMultipartConfigAndCleansTemporaryPartsAfterTheRequest()
+            throws Exception {
+        AtomicReference<Part> uploadedPart = new AtomicReference<Part>();
+        try (RuntimeFixture fixture = RuntimeFixture.open(temporaryDirectory)) {
+            ServletRegistration.Dynamic servlet = fixture.runtime.addServlet(
+                    "upload", new MultipartServlet(uploadedPart));
+            servlet.setMultipartConfig(new MultipartConfigElement("", 64L, 1024L, 0));
+            assertTrue(servlet.addMapping("/upload").isEmpty());
+            fixture.start();
+
+            ContainerExchange exchange = multipartExchange("/upload", "tiny-boundary",
+                    "title", "monthly",
+                    "document", "plan.txt", "text/plain", "content");
+            fixture.runtime.service(exchange);
+
+            assertEquals(200, exchange.response().status());
+            assertEquals("title=monthly;titles=[monthly, monthly-again];"
+                            + "file=plan.txt;size=7",
+                    new String(exchange.response().bodyBytes(), StandardCharsets.UTF_8));
+            assertTrue(uploadedPart.get() != null);
+            assertEquals(0L, fileCount(servletTempDirectory(fixture.runtime)));
+            assertThrows(IOException.class, new Executable() {
+                @Override
+                public void execute() throws Throwable {
+                    uploadedPart.get().getInputStream();
+                }
+            });
+        }
+    }
+
+    @Test
+    void cleansMultipartPartsWhenAsyncProcessingActuallyCompletes() throws Exception {
+        AtomicReference<Part> uploadedPart = new AtomicReference<Part>();
+        try (RuntimeFixture fixture = RuntimeFixture.open(temporaryDirectory)) {
+            ServletRegistration.Dynamic servlet = fixture.runtime.addServlet(
+                    "async-upload", new AsyncMultipartServlet(uploadedPart));
+            servlet.setAsyncSupported(true);
+            servlet.setMultipartConfig(new MultipartConfigElement("", 64L, 1024L, 0));
+            assertTrue(servlet.addMapping("/async-upload").isEmpty());
+            fixture.start();
+
+            ContainerExchange exchange = multipartExchange(
+                    "/async-upload", "async-boundary",
+                    "title", "monthly",
+                    "document", "plan.txt", "text/plain", "content");
+            fixture.runtime.service(exchange);
+
+            assertTrue(uploadedPart.get() != null);
+            assertEquals(0L, fileCount(servletTempDirectory(fixture.runtime)));
+            assertThrows(IOException.class, new Executable() {
+                @Override
+                public void execute() throws Throwable {
+                    uploadedPart.get().getInputStream();
+                }
+            });
+        }
+    }
+
+    @Test
+    void propagatesParameterAccessFailureWhenConfiguredMultipartExceedsTheFileLimit()
+            throws Exception {
+        try (RuntimeFixture fixture = RuntimeFixture.open(temporaryDirectory)) {
+            ServletRegistration.Dynamic servlet = fixture.runtime.addServlet(
+                    "parameter-upload", new MultipartParameterServlet());
+            servlet.setMultipartConfig(new MultipartConfigElement("", 4L, 1024L, 0));
+            assertTrue(servlet.addMapping("/parameter-upload").isEmpty());
+            fixture.start();
+
+            ContainerExchange exchange = multipartExchange(
+                    "/parameter-upload", "parameter-boundary",
+                    "title", "monthly",
+                    "document", "plan.txt", "text/plain", "content");
+            IllegalStateException failure = assertThrows(
+                    IllegalStateException.class, new Executable() {
+                        @Override
+                        public void execute() throws Throwable {
+                            fixture.runtime.service(exchange);
+                        }
+                    });
+            assertTrue(failure.getMessage().contains("size limit exceeded"));
+        }
+    }
+
     private static ContainerExchange exchange(String path) {
         return new ContainerExchange(ContainerRequest.builder()
                 .method("GET")
                 .rawUri(path)
                 .path(path)
+                .build());
+    }
+
+    private static ContainerExchange multipartExchange(
+            String path, String boundary, String fieldName, String fieldValue,
+            String fileField, String fileName, String contentType, String fileValue) {
+        String body = "--" + boundary + "\r\n"
+                + "Content-Disposition: form-data; name=\"" + fieldName + "\"\r\n\r\n"
+                + fieldValue + "\r\n"
+                + "--" + boundary + "\r\n"
+                + "Content-Disposition: form-data; name=\"" + fieldName + "\"\r\n\r\n"
+                + fieldValue + "-again\r\n"
+                + "--" + boundary + "\r\n"
+                + "Content-Disposition: form-data; name=\"" + fileField
+                + "\"; filename=\"" + fileName + "\"\r\n"
+                + "Content-Type: " + contentType + "\r\n\r\n"
+                + fileValue + "\r\n"
+                + "--" + boundary + "--\r\n";
+        byte[] bytes = body.getBytes(StandardCharsets.UTF_8);
+        return new ContainerExchange(ContainerRequest.builder()
+                .method("POST")
+                .rawUri(path)
+                .path(path)
+                .addHeader("Content-Type", "multipart/form-data; boundary=" + boundary)
+                .addHeader("Content-Length", Integer.toString(bytes.length))
+                .body(bytes)
                 .build());
     }
 
@@ -440,6 +555,50 @@ class JavaxServletRuntimeTest {
         }
     }
 
+    private static final class MultipartServlet extends HttpServlet {
+        private final AtomicReference<Part> uploadedPart;
+
+        private MultipartServlet(AtomicReference<Part> uploadedPart) {
+            this.uploadedPart = uploadedPart;
+        }
+
+        @Override
+        protected void doPost(HttpServletRequest request, HttpServletResponse response)
+                throws IOException, ServletException {
+            Part file = request.getPart("document");
+            uploadedPart.set(file);
+            PrintWriter writer = response.getWriter();
+            writer.write("title=" + request.getParameter("title")
+                    + ";titles=" + Arrays.toString(request.getParameterValues("title"))
+                    + ";file=" + file.getSubmittedFileName()
+                    + ";size=" + file.getSize());
+        }
+    }
+
+    private static final class AsyncMultipartServlet extends HttpServlet {
+        private final AtomicReference<Part> uploadedPart;
+
+        private AsyncMultipartServlet(AtomicReference<Part> uploadedPart) {
+            this.uploadedPart = uploadedPart;
+        }
+
+        @Override
+        protected void doPost(HttpServletRequest request, HttpServletResponse response)
+                throws IOException, ServletException {
+            uploadedPart.set(request.getPart("document"));
+            AsyncContext async = request.startAsync();
+            async.complete();
+        }
+    }
+
+    private static final class MultipartParameterServlet extends HttpServlet {
+        @Override
+        protected void doPost(HttpServletRequest request, HttpServletResponse response)
+                throws IOException {
+            response.getWriter().write(request.getParameter("title"));
+        }
+    }
+
     private static final class RecordingRequestListener implements ServletRequestListener {
         private final String name;
         private final List<String> events;
@@ -529,5 +688,17 @@ class JavaxServletRuntimeTest {
         Field field = JavaxServletRuntime.class.getDeclaredField("listeners");
         field.setAccessible(true);
         return (List<EventListener>) field.get(runtime);
+    }
+
+    private static Path servletTempDirectory(JavaxServletRuntime runtime) throws Exception {
+        Field field = JavaxServletRuntime.class.getDeclaredField("servletContext");
+        field.setAccessible(true);
+        return ((TinyServletContext) field.get(runtime)).tempDirectory();
+    }
+
+    private static long fileCount(Path directory) throws IOException {
+        try (java.util.stream.Stream<Path> files = Files.list(directory)) {
+            return files.count();
+        }
     }
 }

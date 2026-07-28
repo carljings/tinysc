@@ -183,10 +183,17 @@ public final class WebAppDescriptor {
         private final Map<String, String> initParams;
         private final Integer loadOnStartup;
         private final boolean asyncSupported;
+        private final MultipartConfigDefinition multipartConfig;
 
         public ServletDefinition(String name, String className, String jspFile,
                                  Map<String, String> initParams, Integer loadOnStartup,
                                  boolean asyncSupported) {
+            this(name, className, jspFile, initParams, loadOnStartup, asyncSupported, null);
+        }
+
+        public ServletDefinition(String name, String className, String jspFile,
+                                 Map<String, String> initParams, Integer loadOnStartup,
+                                 boolean asyncSupported, MultipartConfigDefinition multipartConfig) {
             this.name = requireText(name, "servlet-name");
             if ((className == null || className.isEmpty()) == (jspFile == null || jspFile.isEmpty())) {
                 throw new IllegalArgumentException(
@@ -197,6 +204,7 @@ public final class WebAppDescriptor {
             this.initParams = immutableMap(initParams);
             this.loadOnStartup = loadOnStartup;
             this.asyncSupported = asyncSupported;
+            this.multipartConfig = multipartConfig;
         }
 
         public String name() {
@@ -221,6 +229,53 @@ public final class WebAppDescriptor {
 
         public boolean asyncSupported() {
             return asyncSupported;
+        }
+
+        public MultipartConfigDefinition multipartConfig() {
+            return multipartConfig;
+        }
+    }
+
+    public static final class MultipartConfigDefinition {
+        private final String location;
+        private final long maxFileSize;
+        private final long maxRequestSize;
+        private final int fileSizeThreshold;
+
+        public MultipartConfigDefinition(String location, long maxFileSize,
+                                         long maxRequestSize, int fileSizeThreshold) {
+            if (maxFileSize < -1) {
+                throw new IllegalArgumentException(
+                        "max-file-size must be -1 or non-negative");
+            }
+            if (maxRequestSize < -1) {
+                throw new IllegalArgumentException(
+                        "max-request-size must be -1 or non-negative");
+            }
+            if (fileSizeThreshold < 0) {
+                throw new IllegalArgumentException(
+                        "file-size-threshold must not be negative");
+            }
+            this.location = location == null ? "" : location;
+            this.maxFileSize = maxFileSize;
+            this.maxRequestSize = maxRequestSize;
+            this.fileSizeThreshold = fileSizeThreshold;
+        }
+
+        public String location() {
+            return location;
+        }
+
+        public long maxFileSize() {
+            return maxFileSize;
+        }
+
+        public long maxRequestSize() {
+            return maxRequestSize;
+        }
+
+        public int fileSizeThreshold() {
+            return fileSizeThreshold;
         }
     }
 
