@@ -123,9 +123,38 @@ class ProbeWarIntegrationTest {
             assertEquals("title=monthly;file=plan.txt;size=7;"
                     + "type=text/plain;payload=content", upload.body);
 
+            Response descriptorOverride = multipart(port, "/probe/upload",
+                    "descriptor-override-boundary",
+                    "title", "monthly", "document", "override.txt", "text/plain",
+                    "123456789");
+            assertEquals(200, descriptorOverride.status);
+            assertEquals("title=monthly;file=override.txt;size=9;"
+                    + "type=text/plain;payload=123456789", descriptorOverride.body);
+
             Response oversizedUpload = multipart(port, "/probe/upload", "limit-boundary",
                     "title", "monthly", "document", "large.txt", "text/plain", repeat('x', 65));
             assertEquals(500, oversizedUpload.status);
+
+            Response annotatedUpload = multipart(port, "/probe/annotated-upload",
+                    "annotation-boundary",
+                    "title", "monthly", "document", "annotated.txt", "text/plain", "content");
+            assertEquals(200, annotatedUpload.status);
+            assertEquals("applied", annotatedUpload.filterHeader);
+            assertEquals("title=monthly;file=annotated.txt;size=7;"
+                    + "type=text/plain;payload=content", annotatedUpload.body);
+
+            Response oversizedAnnotatedUpload = multipart(port, "/probe/annotated-upload",
+                    "annotation-limit-boundary",
+                    "title", "monthly", "document", "large.txt", "text/plain", "123456789");
+            assertEquals(500, oversizedAnnotatedUpload.status);
+
+            Response emptyDescriptorOverride = multipart(port, "/probe/empty-config-upload",
+                    "empty-descriptor-boundary",
+                    "title", "monthly", "document", "empty-config.txt", "text/plain",
+                    "123456789");
+            assertEquals(200, emptyDescriptorOverride.status);
+            assertEquals("title=monthly;file=empty-config.txt;size=9;"
+                    + "type=text/plain;payload=123456789", emptyDescriptorOverride.body);
 
             Response forwardedJarStatic = get(port, "/probe/jar-static-forward", null);
             assertEquals(200, forwardedJarStatic.status);

@@ -28,6 +28,7 @@ import javax.servlet.ServletRequestEvent;
 import javax.servlet.ServletRequestListener;
 import javax.servlet.ServletResponse;
 import javax.servlet.ServletSecurityElement;
+import javax.servlet.annotation.MultipartConfig;
 import javax.servlet.http.HttpServlet;
 import javax.servlet.http.HttpServletRequest;
 import javax.servlet.http.HttpServletResponse;
@@ -195,7 +196,7 @@ public final class JavaxServletRuntime implements WebAppRuntime {
                     && selection.asyncSupported;
             request = new TinyHttpServletRequest(exchange, response, servletContext,
                     sessionManager, mapping, requestPath,
-                    mappedServlet == null ? null : mappedServlet.multipartConfig,
+                    mappedServlet == null ? null : mappedServlet.effectiveMultipartConfig(),
                     asyncSupported, asyncScheduler);
             fireRequestInitialized(request);
             Servlet servlet = mapping == null ? staticResourceServlet : mappedServlet.get();
@@ -1018,6 +1019,7 @@ public final class JavaxServletRuntime implements WebAppRuntime {
         private boolean initialized;
         private String runAsRole;
         private MultipartConfigElement multipartConfig;
+        private boolean multipartConfigResolved;
 
         private ServletHolder(WebAppDescriptor.ServletDefinition definition) {
             name = definition.name();
@@ -1032,6 +1034,7 @@ public final class JavaxServletRuntime implements WebAppRuntime {
                 multipartConfig = new MultipartConfigElement(
                         configured.location(), configured.maxFileSize(),
                         configured.maxRequestSize(), configured.fileSizeThreshold());
+                multipartConfigResolved = true;
             }
         }
 
@@ -1050,6 +1053,39 @@ public final class JavaxServletRuntime implements WebAppRuntime {
             this.name = name;
             this.className = servlet.getClass().getName();
             this.servlet = servlet;
+        }
+
+        private synchronized MultipartConfigElement effectiveMultipartConfig() {
+            if (multipartConfigResolved) {
+                return multipartConfig;
+            }
+            if (jspFile != null || className == null) {
+                multipartConfigResolved = true;
+                return null;
+            }
+            Class<?> type;
+            if (servlet != null) {
+                type = servlet.getClass();
+            } else if (servletClass != null) {
+                type = servletClass;
+            } else {
+                try {
+                    type = application.classLoader().loadClass(className);
+                } catch (ClassNotFoundException ignored) {
+                    return null;
+                }
+            }
+            MultipartConfig annotation = type.getAnnotation(MultipartConfig.class);
+            if (annotation != null) {
+                multipartConfig = new MultipartConfigElement(annotation);
+            }
+            multipartConfigResolved = true;
+            return multipartConfig;
+        }
+
+        private synchronized void setMultipartConfig(MultipartConfigElement config) {
+            multipartConfig = config;
+            multipartConfigResolved = true;
         }
 
         private synchronized Servlet get() throws ServletException {
@@ -1225,7 +1261,7 @@ public final class JavaxServletRuntime implements WebAppRuntime {
             if (config == null) {
                 throw new IllegalArgumentException("multipart config must not be null");
             }
-            holder.multipartConfig = config;
+            holder.setMultipartConfig(config);
         }
 
         @Override

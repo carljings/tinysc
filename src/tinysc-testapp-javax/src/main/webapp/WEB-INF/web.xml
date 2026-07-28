@@ -2,7 +2,8 @@
 <web-app xmlns="http://xmlns.jcp.org/xml/ns/javaee"
          xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
          xsi:schemaLocation="http://xmlns.jcp.org/xml/ns/javaee http://xmlns.jcp.org/xml/ns/javaee/web-app_3_1.xsd"
-         version="3.1">
+         version="3.1"
+         metadata-complete="true">
     <listener>
         <listener-class>example.tinysc.probe.ProbeListener</listener-class>
     </listener>
@@ -60,6 +61,25 @@
     <servlet-mapping>
         <servlet-name>uploadProbeServlet</servlet-name>
         <url-pattern>/upload</url-pattern>
+    </servlet-mapping>
+
+    <servlet>
+        <servlet-name>annotatedUploadProbeServlet</servlet-name>
+        <servlet-class>example.tinysc.probe.UploadProbeServlet</servlet-class>
+    </servlet>
+    <servlet-mapping>
+        <servlet-name>annotatedUploadProbeServlet</servlet-name>
+        <url-pattern>/annotated-upload</url-pattern>
+    </servlet-mapping>
+
+    <servlet>
+        <servlet-name>emptyConfigUploadProbeServlet</servlet-name>
+        <servlet-class>example.tinysc.probe.UploadProbeServlet</servlet-class>
+        <multipart-config/>
+    </servlet>
+    <servlet-mapping>
+        <servlet-name>emptyConfigUploadProbeServlet</servlet-name>
+        <url-pattern>/empty-config-upload</url-pattern>
     </servlet-mapping>
 
     <servlet>

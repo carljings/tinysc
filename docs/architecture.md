@@ -145,7 +145,9 @@ worker 构造 `ContainerRequest` / `ContainerResponse` / `ContainerExchange` 后
 响应快照回到 Netty event loop 写出；完成、超时、断连和拒绝路径都必须释放对应的连接、请求与字节
 额度。
 
-当目标 Servlet 通过 `web.xml` 或 SCI 配置 multipart 时，`getPart(s)` 才按需进入有界解析器。
+当目标 Servlet 通过 `web.xml`、SCI 或 `@MultipartConfig` 配置 multipart 时，`getPart(s)` 才按需
+进入有界解析器。Servlet holder 在首次映射请求时懒解析并缓存注解；XML/SCI 显式配置整体优先，
+不做字段级合并，也不扫描整个 WAR。
 解析器从 `ContainerRequest.bodyStream()` 读取现有聚合 body，执行请求、文件、Part 数和 Part Header
 限额，阈值以上内容写入 ServletContext 临时目录，并在同步请求结束或 Async 真正完成后删除。
 这条路径没有额外复制整份 body，但传输层仍会先完整聚合，因此当前不是流式上传。
