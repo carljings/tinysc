@@ -99,6 +99,11 @@ Servlet。XML/SCI 显式配置存在时会整体覆盖注解，不逐字段合�
 exchange，也不会提前发出 `100 Continue`；为保持响应顺序，后续失败不另行插入错误响应。当前只有全局 raw ingress 预算和单请求体上限，
 没有独立的每连接公平份额；单连接可以占用全局预算，但不能突破全局硬边界。
 
+同步 error-page 不是 CLI 配置项，而是 `web.xml` 行为：只有在同步请求尚未把响应 bytes 写到网络前，
+`sendError(...)` 或未捕获异常才会进入 error dispatch；`setStatus(...)` 不单独触发。进入自定义 error-page
+时，容器保留普通 header 和 cookie，清掉旧 body 与 `Content-Length`，并只执行 `DispatcherType.ERROR`
+的 Filter 链。已提交响应、Async error dispatch、JSP error page 仍不在配置层面提供。
+
 ## 生产建议
 
 - 一个进程只运行一个 WAR，并为每个实例使用独立 `--base`。

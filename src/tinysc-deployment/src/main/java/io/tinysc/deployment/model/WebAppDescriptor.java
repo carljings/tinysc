@@ -17,6 +17,7 @@ public final class WebAppDescriptor {
     private final List<ServletMapping> servletMappings;
     private final int sessionTimeoutMinutes;
     private final List<String> welcomeFiles;
+    private final List<ErrorPageDefinition> errorPages;
 
     private WebAppDescriptor(Builder builder) {
         version = builder.version;
@@ -29,6 +30,7 @@ public final class WebAppDescriptor {
         servletMappings = immutableList(builder.servletMappings);
         sessionTimeoutMinutes = builder.sessionTimeoutMinutes;
         welcomeFiles = immutableList(builder.welcomeFiles);
+        errorPages = immutableList(builder.errorPages);
     }
 
     public String version() {
@@ -71,6 +73,10 @@ public final class WebAppDescriptor {
         return welcomeFiles;
     }
 
+    public List<ErrorPageDefinition> errorPages() {
+        return errorPages;
+    }
+
     public static Builder builder() {
         return new Builder();
     }
@@ -94,6 +100,7 @@ public final class WebAppDescriptor {
         private final List<ServletMapping> servletMappings = new ArrayList<ServletMapping>();
         private int sessionTimeoutMinutes = 30;
         private final List<String> welcomeFiles = new ArrayList<String>();
+        private final List<ErrorPageDefinition> errorPages = new ArrayList<ErrorPageDefinition>();
 
         private Builder() {
         }
@@ -153,6 +160,27 @@ public final class WebAppDescriptor {
             return this;
         }
 
+        public Builder errorPage(ErrorPageDefinition definition) {
+            for (ErrorPageDefinition existing : errorPages) {
+                if (definition.errorCode != null
+                        && definition.errorCode.equals(existing.errorCode)) {
+                    throw new IllegalArgumentException(
+                            "duplicate error-page status: " + definition.errorCode);
+                }
+                if (definition.exceptionType != null
+                        && definition.exceptionType.equals(existing.exceptionType)) {
+                    throw new IllegalArgumentException(
+                            "duplicate error-page exception: " + definition.exceptionType);
+                }
+                if (definition.errorCode == null && definition.exceptionType == null
+                        && existing.errorCode == null && existing.exceptionType == null) {
+                    throw new IllegalArgumentException("duplicate default error-page");
+                }
+            }
+            errorPages.add(definition);
+            return this;
+        }
+
         public WebAppDescriptor build() {
             for (FilterMapping mapping : filterMappings) {
                 if (!filters.containsKey(mapping.filterName())) {
@@ -173,6 +201,41 @@ public final class WebAppDescriptor {
             if (map.put(key, value) != null) {
                 throw new IllegalArgumentException("duplicate " + kind + ": " + key);
             }
+        }
+    }
+
+    public static final class ErrorPageDefinition {
+        private final Integer errorCode;
+        private final String exceptionType;
+        private final String location;
+
+        public ErrorPageDefinition(Integer errorCode, String exceptionType, String location) {
+            if (errorCode != null && exceptionType != null) {
+                throw new IllegalArgumentException(
+                        "error-page must not declare both error-code and exception-type");
+            }
+            if (errorCode != null && (errorCode.intValue() < 1 || errorCode.intValue() > 999)) {
+                throw new IllegalArgumentException("error-code must be between 1 and 999");
+            }
+            this.errorCode = errorCode;
+            this.exceptionType = exceptionType == null
+                    ? null : requireText(exceptionType, "exception-type");
+            this.location = requireText(location, "location");
+            if (!this.location.startsWith("/")) {
+                throw new IllegalArgumentException("error-page location must be absolute");
+            }
+        }
+
+        public Integer errorCode() {
+            return errorCode;
+        }
+
+        public String exceptionType() {
+            return exceptionType;
+        }
+
+        public String location() {
+            return location;
         }
     }
 

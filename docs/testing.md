@@ -38,6 +38,8 @@ JAVA_HOME=$(/usr/libexec/java_home -v 1.8)
 JAVA_HOME="$JAVA_HOME" mvn -B -ntp clean verify
 ```
 
+当前分支在 Java 8 下执行 `mvn -B -ntp clean verify`，共 206 项测试通过。
+
 发布检查还需要扫描全部发行 class，确认 major version 不高于 52。
 完整 reactor 的 `ReleaseArtifactTest` 会直接扫描 shaded launcher，并同时拒绝多版本 class 和
 `jakarta.servlet` 类进入 1.x 制品。
@@ -69,8 +71,14 @@ multipart 基线测试覆盖 `web.xml` / SCI 显式配置、空 XML 配置、`@M
 状态码差分，证据见
 [multipart Probe WAR 差分验收](acceptance/2026-07-28-multipart-probe-differential.md)。
 
+Probe WAR 也已验证同步 error-page slice：`sendError(404)`、`RuntimeException`、
+`ServletException(IOException root cause)` 会进入 `DispatcherType.ERROR` 和 `ERROR` filter，
+`setStatus(404)` 不会；失败 custom error-page 会落回单次安全 `500`，并清掉 partial body。证据见
+[同步 error-page Probe WAR 差分验收](acceptance/2026-07-28-error-page-probe-differential.md)。
+
 尚未覆盖的关键项包括 `@WebServlet` 等全 WAR 注解发现、流式上传、异步 dispatch、Servlet 非阻塞
-ReadListener/WriteListener、error-page、安全约束、web-fragment、URL 重写 Session 和 TCK。
+ReadListener/WriteListener、已提交响应下的 error-page 恢复、JSP error pages、嵌套 dispatch 全量
+parity、web-fragment、URL 重写 Session 和 TCK。
 当前响应仍全量堆缓冲，
 `WriteListener` / `isReady` 仍是兼容实现，不是真正的非阻塞写；它们完成前不得宣称完整 Servlet 3.1 兼容。
 

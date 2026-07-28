@@ -16,6 +16,7 @@ import javax.servlet.FilterChain;
 import javax.servlet.FilterConfig;
 import javax.servlet.FilterRegistration;
 import javax.servlet.MultipartConfigElement;
+import javax.servlet.RequestDispatcher;
 import javax.servlet.ServletException;
 import javax.servlet.ServletRegistration;
 import javax.servlet.ServletRequest;
@@ -41,10 +42,12 @@ import java.util.EnumSet;
 import java.util.List;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNull;
+import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
@@ -436,6 +439,239 @@ class JavaxServletRuntimeTest {
         }
     }
 
+    @Test
+    void dispatchesConfiguredErrorPageForSendError404() throws Exception {
+        try (RuntimeFixture fixture = RuntimeFixture.open(temporaryDirectory,
+                statusErrorPage(404, "/errors/not-found"))) {
+            mapServlet(fixture, "entry", "/entry",
+                    new SendErrorServlet(404, "missing"));
+            mapServlet(fixture, "not-found", "/errors/not-found",
+                    new ErrorPageServlet("configured-404", null));
+            fixture.start();
+
+            ContainerExchange exchange = exchange("/entry");
+            fixture.runtime.service(exchange);
+
+            assertEquals(404, exchange.response().status());
+            assertEquals("configured-404:ERROR", body(exchange));
+        }
+    }
+
+    @Test
+    void doesNotDispatchErrorPageForSetStatus404() throws Exception {
+        List<String> events = new ArrayList<String>();
+        try (RuntimeFixture fixture = RuntimeFixture.open(temporaryDirectory,
+                statusErrorPage(404, "/errors/not-found"))) {
+            mapServlet(fixture, "entry", "/entry",
+                    new SetStatusServlet(404, "plain-404"));
+            mapServlet(fixture, "not-found", "/errors/not-found",
+                    new ErrorPageServlet("configured-404", events));
+            fixture.start();
+
+            ContainerExchange exchange = exchange("/entry");
+            fixture.runtime.service(exchange);
+
+            assertEquals(404, exchange.response().status());
+            assertEquals("plain-404", body(exchange));
+            assertTrue(events.isEmpty());
+        }
+    }
+
+    @Test
+    void usesDefaultErrorPageWhenStatusIsUnmapped() throws Exception {
+        try (RuntimeFixture fixture = RuntimeFixture.open(temporaryDirectory,
+                defaultErrorPage("/errors/default"))) {
+            mapServlet(fixture, "entry", "/entry",
+                    new SendErrorServlet(418, "teapot"));
+            mapServlet(fixture, "default-error", "/errors/default",
+                    new ErrorPageServlet("default-error", null));
+            fixture.start();
+
+            ContainerExchange exchange = exchange("/entry");
+            fixture.runtime.service(exchange);
+
+            assertEquals(418, exchange.response().status());
+            assertEquals("default-error:ERROR", body(exchange));
+        }
+    }
+
+    @Test
+    void dispatchesClosestMatchingExceptionType() throws Exception {
+        try (RuntimeFixture fixture = RuntimeFixture.open(temporaryDirectory,
+                exceptionErrorPage(RuntimeException.class, "/errors/runtime"),
+                exceptionErrorPage(IllegalArgumentException.class,
+                        "/errors/illegal-argument"))) {
+            mapServlet(fixture, "entry", "/entry",
+                    new ThrowingServlet(new NumberFormatException("not a number")));
+            mapServlet(fixture, "runtime-error", "/errors/runtime",
+                    new ErrorPageServlet("runtime", null));
+            mapServlet(fixture, "illegal-argument-error", "/errors/illegal-argument",
+                    new ErrorPageServlet("illegal-argument", null));
+            fixture.start();
+
+            ContainerExchange exchange = exchange("/entry");
+            fixture.runtime.service(exchange);
+
+            assertEquals(500, exchange.response().status());
+            assertEquals("illegal-argument:ERROR", body(exchange));
+        }
+    }
+
+    @Test
+    void dispatchesServletExceptionRootCauseWhenOuterTypeIsUnmapped() throws Exception {
+        IOException rootCause = new IOException("disk failed");
+        try (RuntimeFixture fixture = RuntimeFixture.open(temporaryDirectory,
+                exceptionErrorPage(IOException.class, "/errors/io"))) {
+            mapServlet(fixture, "entry", "/entry",
+                    new ThrowingServlet(new ServletException("wrapped", rootCause)));
+            mapServlet(fixture, "io-error", "/errors/io",
+                    new ErrorPageServlet("io-root-cause", null));
+            fixture.start();
+
+            ContainerExchange exchange = exchange("/entry");
+            fixture.runtime.service(exchange);
+
+            assertEquals(500, exchange.response().status());
+            assertEquals("io-root-cause:ERROR", body(exchange));
+        }
+    }
+
+    @Test
+    void fallsBackFromExceptionToConfigured500Page() throws Exception {
+        try (RuntimeFixture fixture = RuntimeFixture.open(temporaryDirectory,
+                statusErrorPage(500, "/errors/server"))) {
+            mapServlet(fixture, "entry", "/entry",
+                    new ThrowingServlet(new IOException("unmapped")));
+            mapServlet(fixture, "server-error", "/errors/server",
+                    new ErrorPageServlet("configured-500", null));
+            fixture.start();
+
+            ContainerExchange exchange = exchange("/entry");
+            fixture.runtime.service(exchange);
+
+            assertEquals(500, exchange.response().status());
+            assertEquals("configured-500:ERROR", body(exchange));
+        }
+    }
+
+    @Test
+    void invokesOnlyErrorMappedFiltersDuringErrorDispatch() throws Exception {
+        List<String> events = new ArrayList<String>();
+        try (RuntimeFixture fixture = RuntimeFixture.open(temporaryDirectory,
+                statusErrorPage(404, "/errors/not-found"))) {
+            mapServlet(fixture, "entry", "/entry",
+                    new SendErrorServlet(404, "missing"));
+            mapServlet(fixture, "not-found", "/errors/not-found",
+                    new ErrorPageServlet("handler", events));
+
+            FilterRegistration.Dynamic requestOnly = fixture.runtime.addFilter(
+                    "request-only", new DispatcherRecordingFilter("request-only", events));
+            requestOnly.addMappingForUrlPatterns(
+                    EnumSet.of(DispatcherType.REQUEST), true, "/*");
+
+            FilterRegistration.Dynamic errorOnly = fixture.runtime.addFilter(
+                    "error-only", new DispatcherRecordingFilter("error-only", events));
+            errorOnly.addMappingForUrlPatterns(
+                    EnumSet.of(DispatcherType.ERROR), true, "/errors/*");
+
+            FilterRegistration.Dynamic forwardOnly = fixture.runtime.addFilter(
+                    "forward-only", new DispatcherRecordingFilter("forward-only", events));
+            forwardOnly.addMappingForUrlPatterns(
+                    EnumSet.of(DispatcherType.FORWARD), true, "/errors/*");
+            fixture.start();
+
+            ContainerExchange exchange = exchange("/entry");
+            fixture.runtime.service(exchange);
+
+            assertEquals(Arrays.asList(
+                    "request-only:REQUEST",
+                    "error-only:ERROR",
+                    "handler:ERROR"), events);
+        }
+    }
+
+    @Test
+    void exposesStandardErrorRequestAttributes() throws Exception {
+        IOException failure = new IOException("disk failed");
+        AtomicReference<List<Object>> captured = new AtomicReference<List<Object>>();
+        try (RuntimeFixture fixture = RuntimeFixture.open(temporaryDirectory,
+                exceptionErrorPage(IOException.class, "/errors/io"))) {
+            mapServlet(fixture, "entry", "/boom", new ThrowingServlet(failure));
+            mapServlet(fixture, "io-error", "/errors/io",
+                    new AttributeCapturingErrorPageServlet("attributes", captured,
+                            RequestDispatcher.ERROR_STATUS_CODE,
+                            RequestDispatcher.ERROR_MESSAGE,
+                            RequestDispatcher.ERROR_REQUEST_URI,
+                            RequestDispatcher.ERROR_SERVLET_NAME,
+                            RequestDispatcher.ERROR_EXCEPTION,
+                            RequestDispatcher.ERROR_EXCEPTION_TYPE));
+            fixture.start();
+
+            ContainerExchange exchange = exchange("/boom");
+            fixture.runtime.service(exchange);
+
+            assertEquals(500, exchange.response().status());
+            assertEquals("attributes:ERROR", body(exchange));
+            assertEquals(Integer.valueOf(500), captured.get().get(0));
+            assertEquals("disk failed", captured.get().get(1));
+            assertEquals("/boom", captured.get().get(2));
+            assertEquals("entry", captured.get().get(3));
+            assertSame(failure, captured.get().get(4));
+            assertSame(IOException.class, captured.get().get(5));
+        }
+    }
+
+    @Test
+    void doesNotOverwriteExistingForwardAttributes() throws Exception {
+        AtomicReference<List<Object>> captured = new AtomicReference<List<Object>>();
+        try (RuntimeFixture fixture = RuntimeFixture.open(temporaryDirectory,
+                statusErrorPage(500, "/errors/server"))) {
+            mapServlet(fixture, "entry", "/entry", new ForwardAttributesFailureServlet());
+            mapServlet(fixture, "server-error", "/errors/server",
+                    new AttributeCapturingErrorPageServlet("forward-attributes", captured,
+                            RequestDispatcher.FORWARD_REQUEST_URI,
+                            RequestDispatcher.FORWARD_CONTEXT_PATH,
+                            RequestDispatcher.FORWARD_SERVLET_PATH,
+                            RequestDispatcher.FORWARD_PATH_INFO,
+                            RequestDispatcher.FORWARD_QUERY_STRING));
+            fixture.start();
+
+            ContainerExchange exchange = exchange("/entry");
+            fixture.runtime.service(exchange);
+
+            assertEquals(Arrays.<Object>asList(
+                    "/existing/request",
+                    "/existing-context",
+                    "/existing-servlet",
+                    "/existing-path-info",
+                    "existing=query"), captured.get());
+        }
+    }
+
+    @Test
+    void fallsBackTo500WithoutRecursingWhenErrorPageFails() throws Exception {
+        AtomicInteger invocations = new AtomicInteger();
+        try (RuntimeFixture fixture = RuntimeFixture.open(temporaryDirectory,
+                statusErrorPage(404, "/errors/failing"),
+                statusErrorPage(500, "/errors/failing"))) {
+            mapServlet(fixture, "entry", "/entry",
+                    new SendErrorServlet(404, "missing"));
+            mapServlet(fixture, "failing-error", "/errors/failing",
+                    new FailingErrorPageServlet(invocations));
+            fixture.start();
+
+            ContainerExchange exchange = exchange("/entry");
+            fixture.runtime.service(exchange);
+
+            assertEquals(1, invocations.get());
+            assertEquals(500, exchange.response().status());
+            assertTrue(exchange.response().firstHeader("Content-Type")
+                    .startsWith("text/plain"));
+            assertTrue(body(exchange).contains("Internal Server Error"));
+            assertTrue(!body(exchange).contains("partial-error-page"));
+        }
+    }
+
     private static ContainerExchange exchange(String path) {
         return new ContainerExchange(ContainerRequest.builder()
                 .method("GET")
@@ -470,6 +706,31 @@ class JavaxServletRuntimeTest {
                 .build());
     }
 
+    private static String body(ContainerExchange exchange) {
+        return new String(exchange.response().bodyBytes(), StandardCharsets.UTF_8);
+    }
+
+    private static String statusErrorPage(int status, String location) {
+        return "<error-page><error-code>" + status + "</error-code>"
+                + "<location>" + location + "</location></error-page>";
+    }
+
+    private static String exceptionErrorPage(
+            Class<? extends Throwable> exceptionType, String location) {
+        return "<error-page><exception-type>" + exceptionType.getName() + "</exception-type>"
+                + "<location>" + location + "</location></error-page>";
+    }
+
+    private static String defaultErrorPage(String location) {
+        return "<error-page><location>" + location + "</location></error-page>";
+    }
+
+    private static void mapServlet(RuntimeFixture fixture, String name, String path,
+                                   HttpServlet servlet) {
+        ServletRegistration.Dynamic registration = fixture.runtime.addServlet(name, servlet);
+        assertTrue(registration.addMapping(path).isEmpty());
+    }
+
     private static final class RecordingFilter implements Filter {
         private final String name;
         private final List<String> events;
@@ -492,6 +753,138 @@ class JavaxServletRuntimeTest {
 
         @Override
         public void destroy() {
+        }
+    }
+
+    private static final class SendErrorServlet extends HttpServlet {
+        private final int status;
+        private final String message;
+
+        private SendErrorServlet(int status, String message) {
+            this.status = status;
+            this.message = message;
+        }
+
+        @Override
+        protected void service(HttpServletRequest request, HttpServletResponse response)
+                throws IOException {
+            response.sendError(status, message);
+        }
+    }
+
+    private static final class SetStatusServlet extends HttpServlet {
+        private final int status;
+        private final String body;
+
+        private SetStatusServlet(int status, String body) {
+            this.status = status;
+            this.body = body;
+        }
+
+        @Override
+        protected void service(HttpServletRequest request, HttpServletResponse response)
+                throws IOException {
+            response.setStatus(status);
+            response.getWriter().write(body);
+        }
+    }
+
+    private static final class ThrowingServlet extends HttpServlet {
+        private final Exception failure;
+
+        private ThrowingServlet(Exception failure) {
+            this.failure = failure;
+        }
+
+        @Override
+        protected void service(HttpServletRequest request, HttpServletResponse response)
+                throws ServletException, IOException {
+            if (failure instanceof IOException) {
+                throw (IOException) failure;
+            }
+            if (failure instanceof ServletException) {
+                throw (ServletException) failure;
+            }
+            if (failure instanceof RuntimeException) {
+                throw (RuntimeException) failure;
+            }
+            throw new ServletException(failure);
+        }
+    }
+
+    private static final class ErrorPageServlet extends HttpServlet {
+        private final String marker;
+        private final List<String> events;
+
+        private ErrorPageServlet(String marker, List<String> events) {
+            this.marker = marker;
+            this.events = events;
+        }
+
+        @Override
+        protected void service(HttpServletRequest request, HttpServletResponse response)
+                throws IOException {
+            String event = marker + ":" + request.getDispatcherType().name();
+            if (events != null) {
+                events.add(event);
+            }
+            response.getWriter().write(event);
+        }
+    }
+
+    private static final class AttributeCapturingErrorPageServlet extends HttpServlet {
+        private final String marker;
+        private final AtomicReference<List<Object>> captured;
+        private final String[] attributeNames;
+
+        private AttributeCapturingErrorPageServlet(
+                String marker, AtomicReference<List<Object>> captured,
+                String... attributeNames) {
+            this.marker = marker;
+            this.captured = captured;
+            this.attributeNames = attributeNames;
+        }
+
+        @Override
+        protected void service(HttpServletRequest request, HttpServletResponse response)
+                throws IOException {
+            List<Object> attributes = new ArrayList<Object>(attributeNames.length);
+            for (String attributeName : attributeNames) {
+                attributes.add(request.getAttribute(attributeName));
+            }
+            captured.set(attributes);
+            response.getWriter().write(
+                    marker + ":" + request.getDispatcherType().name());
+        }
+    }
+
+    private static final class ForwardAttributesFailureServlet extends HttpServlet {
+        @Override
+        protected void service(HttpServletRequest request, HttpServletResponse response)
+                throws ServletException {
+            request.setAttribute(RequestDispatcher.FORWARD_REQUEST_URI, "/existing/request");
+            request.setAttribute(RequestDispatcher.FORWARD_CONTEXT_PATH, "/existing-context");
+            request.setAttribute(RequestDispatcher.FORWARD_SERVLET_PATH, "/existing-servlet");
+            request.setAttribute(RequestDispatcher.FORWARD_PATH_INFO, "/existing-path-info");
+            request.setAttribute(RequestDispatcher.FORWARD_QUERY_STRING, "existing=query");
+            throw new ServletException("forward target failed");
+        }
+    }
+
+    private static final class FailingErrorPageServlet extends HttpServlet {
+        private final AtomicInteger invocations;
+
+        private FailingErrorPageServlet(AtomicInteger invocations) {
+            this.invocations = invocations;
+        }
+
+        @Override
+        protected void service(HttpServletRequest request, HttpServletResponse response)
+                throws ServletException, IOException {
+            invocations.incrementAndGet();
+            response.setContentType("text/html");
+            response.getWriter().write("partial-error-page");
+            throw new ServletException("error page failed");
         }
     }
 
@@ -666,9 +1059,20 @@ class JavaxServletRuntimeTest {
             this.runtime = runtime;
         }
 
-        private static RuntimeFixture open(Path temporaryDirectory) throws Exception {
+        private static RuntimeFixture open(Path temporaryDirectory, String... errorPages)
+                throws Exception {
             Path webRoot = temporaryDirectory.resolve("webapp");
             Files.createDirectories(webRoot.resolve("WEB-INF"));
+            if (errorPages.length > 0) {
+                StringBuilder xml = new StringBuilder(
+                        "<web-app xmlns=\"http://xmlns.jcp.org/xml/ns/javaee\" version=\"3.1\">");
+                for (String errorPage : errorPages) {
+                    xml.append(errorPage);
+                }
+                xml.append("</web-app>");
+                Files.write(webRoot.resolve("WEB-INF/web.xml"),
+                        xml.toString().getBytes(StandardCharsets.UTF_8));
+            }
             PreparedWebApp application = new WarDeploymentManager().prepare(
                     webRoot, temporaryDirectory.resolve("base"), "",
                     JavaxServletRuntimeTest.class.getClassLoader());

@@ -13,6 +13,7 @@ import javax.servlet.FilterChain;
 import javax.servlet.FilterRegistration;
 import javax.servlet.DispatcherType;
 import javax.servlet.MultipartConfigElement;
+import javax.servlet.RequestDispatcher;
 import javax.servlet.Servlet;
 import javax.servlet.ServletContainerInitializer;
 import javax.servlet.ServletContextAttributeEvent;
@@ -103,6 +104,11 @@ public final class JavaxServletRuntime implements WebAppRuntime {
             new ArrayList<WebAppDescriptor.ServletMapping>();
     private final List<WebAppDescriptor.FilterMapping> filterMappings =
             new ArrayList<WebAppDescriptor.FilterMapping>();
+    private final Map<Integer, WebAppDescriptor.ErrorPageDefinition> statusErrorPages =
+            new LinkedHashMap<Integer, WebAppDescriptor.ErrorPageDefinition>();
+    private final Map<String, WebAppDescriptor.ErrorPageDefinition> exceptionErrorPages =
+            new LinkedHashMap<String, WebAppDescriptor.ErrorPageDefinition>();
+    private final WebAppDescriptor.ErrorPageDefinition defaultErrorPage;
     private final Servlet staticResourceServlet = new StaticResourceServlet();
     private volatile LifecycleState state = LifecycleState.NEW;
     private volatile ServletRequestListener[] requestListeners = EMPTY_REQUEST_LISTENERS;
@@ -129,6 +135,17 @@ public final class JavaxServletRuntime implements WebAppRuntime {
         filterMappings.addAll(descriptor.filterMappings());
         mapper = new ServletMapper(servletMappings);
         listenerDefinitions.addAll(descriptor.listenerClasses());
+        WebAppDescriptor.ErrorPageDefinition configuredDefaultErrorPage = null;
+        for (WebAppDescriptor.ErrorPageDefinition definition : descriptor.errorPages()) {
+            if (definition.errorCode() != null) {
+                statusErrorPages.put(definition.errorCode(), definition);
+            } else if (definition.exceptionType() != null) {
+                exceptionErrorPages.put(definition.exceptionType(), definition);
+            } else {
+                configuredDefaultErrorPage = definition;
+            }
+        }
+        defaultErrorPage = configuredDefaultErrorPage;
         for (WebAppDescriptor.ServletDefinition definition : descriptor.servlets().values()) {
             servlets.put(definition.name(), new ServletHolder(definition));
         }
@@ -177,6 +194,7 @@ public final class JavaxServletRuntime implements WebAppRuntime {
         ClassLoader previous = enterWebAppClassLoader();
         TinyHttpServletRequest request = null;
         TinyHttpServletResponse response = new TinyHttpServletResponse(exchange.response());
+        String servletName = null;
         try {
             String requestPath = pathWithinContext(exchange.request().path());
             if (requestPath == null) {
@@ -184,13 +202,14 @@ public final class JavaxServletRuntime implements WebAppRuntime {
                 return;
             }
             ServletMappingResult mapping = mapper.map(requestPath);
+            servletName = mapping == null ? null : mapping.servletName();
             FilterSelection selection = matchingFilters(
-                    mapping == null ? "" : mapping.servletName(),
+                    servletName == null ? "" : servletName,
                     requestPath, DispatcherType.REQUEST);
-            ServletHolder mappedServlet = mapping == null ? null : servlets.get(mapping.servletName());
+            ServletHolder mappedServlet = mapping == null ? null : servlets.get(servletName);
             if (mapping != null && mappedServlet == null) {
                 throw new ServletException("mapping references unknown servlet: "
-                        + mapping.servletName());
+                        + servletName);
             }
             boolean asyncSupported = mappedServlet != null && mappedServlet.asyncSupported
                     && selection.asyncSupported;
@@ -201,12 +220,24 @@ public final class JavaxServletRuntime implements WebAppRuntime {
             fireRequestInitialized(request);
             Servlet servlet = mapping == null ? staticResourceServlet : mappedServlet.get();
             new ApplicationFilterChain(selection.filters, servlet).doFilter(request, response);
-        } catch (Exception failure) {
-            if (request != null && request.asyncContextInternal() != null
-                    && !request.asyncContextInternal().isTerminal()) {
-                request.asyncContextInternal().fail(failure);
+            if (request.asyncContextInternal() == null) {
+                dispatchPendingError(request, response, servletName);
             }
-            throw failure;
+        } catch (Throwable failure) {
+            throwIfFatal(failure);
+            TinyAsyncContext asyncContext =
+                    request == null ? null : request.asyncContextInternal();
+            if (asyncContext != null) {
+                if (!asyncContext.isTerminal()) {
+                    asyncContext.fail(failure);
+                }
+                rethrowFailure(failure);
+            }
+            if (request == null
+                    || response.isCommitted()
+                    || !dispatchExceptionError(request, response, servletName, failure)) {
+                rethrowFailure(failure);
+            }
         } finally {
             try {
                 if (request != null) {
@@ -308,6 +339,129 @@ public final class JavaxServletRuntime implements WebAppRuntime {
             return "/";
         }
         return path.startsWith(contextPath + "/") ? path.substring(contextPath.length()) : null;
+    }
+
+    private void dispatchPendingError(TinyHttpServletRequest request,
+                                      TinyHttpServletResponse response,
+                                      String servletName) {
+        TinyHttpServletResponse.PendingError error = response.pendingError();
+        if (error == null) {
+            return;
+        }
+        WebAppDescriptor.ErrorPageDefinition page =
+                statusErrorPages.get(Integer.valueOf(error.status()));
+        if (page == null) {
+            page = defaultErrorPage;
+        }
+        if (page != null) {
+            dispatchErrorPage(request, response, servletName, page,
+                    error.status(), error.message(), null);
+        }
+    }
+
+    private boolean dispatchExceptionError(TinyHttpServletRequest request,
+                                           TinyHttpServletResponse response,
+                                           String servletName,
+                                           Throwable failure) {
+        Throwable realError = failure;
+        if (failure instanceof ServletException) {
+            Throwable rootCause = ((ServletException) failure).getRootCause();
+            if (rootCause != null) {
+                realError = rootCause;
+            }
+        }
+
+        WebAppDescriptor.ErrorPageDefinition page = findExceptionErrorPage(failure);
+        if (page == null && realError != failure) {
+            page = findExceptionErrorPage(realError);
+        }
+        if (page == null) {
+            page = statusErrorPages.get(
+                    Integer.valueOf(HttpServletResponse.SC_INTERNAL_SERVER_ERROR));
+        }
+        if (page == null) {
+            page = defaultErrorPage;
+        }
+        if (page == null) {
+            return false;
+        }
+
+        dispatchErrorPage(request, response, servletName, page,
+                HttpServletResponse.SC_INTERNAL_SERVER_ERROR,
+                failure.getMessage(), realError);
+        return true;
+    }
+
+    private WebAppDescriptor.ErrorPageDefinition findExceptionErrorPage(Throwable failure) {
+        Class<?> type = failure.getClass();
+        while (type != null && Throwable.class.isAssignableFrom(type)) {
+            WebAppDescriptor.ErrorPageDefinition page =
+                    exceptionErrorPages.get(type.getName());
+            if (page != null) {
+                return page;
+            }
+            type = type.getSuperclass();
+        }
+        return null;
+    }
+
+    private void dispatchErrorPage(TinyHttpServletRequest request,
+                                   TinyHttpServletResponse response,
+                                   String servletName,
+                                   WebAppDescriptor.ErrorPageDefinition page,
+                                   int status,
+                                   String message,
+                                   Throwable exception) {
+        String requestUri = request.getRequestURI();
+        try {
+            response.prepareErrorDispatch();
+            response.setStatus(status);
+            setErrorAttributes(request, servletName, requestUri,
+                    status, message, exception);
+            dispatch(request, request, response, page.location(), null, DispatcherType.ERROR);
+            if (response.pendingError() != null) {
+                servletContext.log("Error page called sendError: " + page.location());
+                response.renderInternalServerErrorFallback();
+            }
+        } catch (Throwable handlerFailure) {
+            throwIfFatal(handlerFailure);
+            servletContext.log("Error page failed: " + page.location(), handlerFailure);
+            response.renderInternalServerErrorFallback();
+        }
+    }
+
+    private static void setErrorAttributes(TinyHttpServletRequest request,
+                                           String servletName,
+                                           String requestUri,
+                                           int status,
+                                           String message,
+                                           Throwable exception) {
+        request.setAttribute(RequestDispatcher.ERROR_STATUS_CODE, Integer.valueOf(status));
+        request.setAttribute(RequestDispatcher.ERROR_MESSAGE, message == null ? "" : message);
+        request.setAttribute(RequestDispatcher.ERROR_REQUEST_URI, requestUri);
+        request.setAttribute(RequestDispatcher.ERROR_SERVLET_NAME, servletName);
+        request.setAttribute(RequestDispatcher.ERROR_EXCEPTION, exception);
+        request.setAttribute(RequestDispatcher.ERROR_EXCEPTION_TYPE,
+                exception == null ? null : exception.getClass());
+    }
+
+    private static void throwIfFatal(Throwable failure) {
+        if (failure instanceof ThreadDeath) {
+            throw (ThreadDeath) failure;
+        }
+        if (failure instanceof VirtualMachineError) {
+            throw (VirtualMachineError) failure;
+        }
+    }
+
+    private static void rethrowFailure(Throwable failure) throws Exception {
+        if (failure instanceof Exception) {
+            throw (Exception) failure;
+        }
+        if (failure instanceof Error) {
+            throw (Error) failure;
+        }
+        throw new ServletException(failure);
     }
 
     private void initializeServletContainerInitializers() throws Exception {
