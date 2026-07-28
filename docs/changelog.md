@@ -18,6 +18,9 @@ Known limitations；提交历史不能替代发布说明。
   Header 限额、磁盘阈值和请求结束清理；解析器直接读取现有请求流，避免额外复制完整 body。
 - 已注册 Servlet 可用 `@MultipartConfig` 提供缺省配置；`web.xml` / SCI 显式配置整体优先，
   不进行字段级拼接，也不引入全 WAR 注解扫描或启动期扫描成本。
+- 同步 `web.xml` error-page：`sendError` 和未捕获 Servlet 异常可触发 `DispatcherType.ERROR`、`ERROR`
+  filter、标准 error attributes、原始 header/cookie 保留、`Content-Length` 清理、`Content-Type`
+  恢复，以及单次安全 `500` fallback；`setStatus(...)` 本身不触发 error dispatch。
 - `tinysc inspect` namespace/bytecode 建议与 `tinysc start` 启动命令。
 - Probe WAR 端到端测试、Tomcat 同机基准脚本及两个真实 WAR 的分阶段验收报告。
 - shaded launcher 的 Java 8 class-major 与 1.x namespace 自动发布门禁。
@@ -68,13 +71,19 @@ Known limitations；提交历史不能替代发布说明。
   缺失资源仍返回 `404`，已有 Servlet 映射仍优先，修复 Legacy 页面加载 `.tpl` 时的 `405`。
 - 文件系统和 Resource JAR 静态资源的 `GET` / `HEAD` 现在支持 `If-Modified-Since`，未修改时返回
   `304`；静态 `POST` 仍按 Tomcat 8.5.100 语义返回资源体，不套用该条件请求捷径。
+- 当自定义 error-page 失败时，TinySC 现在会丢弃 partial body 并返回一次 plain-text `500`
+  兜底，不再递归 error selection；这和 Tomcat 保留 `partial-error-page` 的行为不同，是刻意的安全差异。
 
 ### Verification
 
-- 当前分支在 Java 8 下执行 `mvn -B -ntp clean verify`，共 177 项测试通过。
+- 当前分支在 Java 8 下执行 `mvn -B -ntp clean verify`，共 206 项测试通过。
 - 同一 Probe WAR 在 TinySC 与 Tomcat 8.5.100 上的 XML 9-byte 覆盖与注解-only 7-byte 上传均返回
   相同 `200` 响应体；注解 9-byte 和 XML 65-byte 超限时两边均返回 `500`。证据见
   [multipart Probe WAR 差分验收](acceptance/2026-07-28-multipart-probe-differential.md)。
+- 同一 Probe WAR 的同步 error-page slice 已完成差分；`sendError(404)`、`RuntimeException`、
+  `ServletException(IOException root cause)` 与 Tomcat 8.5.100 对齐，失败 custom error-page 则按 TinySC 的
+  单次安全 `500` 兜底。证据见
+  [同步 error-page Probe WAR 差分验收](acceptance/2026-07-28-error-page-probe-differential.md)。
 - 2026-07-22 最终候选的性能对照仍对应当时的 157 项测试，尚未将 multipart 基线纳入重测。
 - 最终候选在并发 32/128 下各完成 5 个独立进程的同机同参交替对照，两组均 0 失败；吞吐分别为
   Tomcat 的 93.77% 和 91.01%。它只满足当前可回滚切换的 90% 安全门槛，仍未满足 1.0 的吞吐
@@ -87,11 +96,12 @@ Known limitations；提交历史不能替代发布说明。
 ### Known limitations
 
 - 尚未完成 `@WebServlet` 等全 WAR 注解发现、流式上传、异步 dispatch、Servlet 非阻塞
-  ReadListener/WriteListener、真正流式响应写、error-page、安全约束、web-fragment 和 TCK。
+  ReadListener/WriteListener、已提交响应下的 error-page 恢复、JSP error pages、嵌套 dispatch 全量
+  parity、真正流式响应写、web-fragment、安全约束和 TCK。
 - HTTPS、HTTP/2、健康端点、配置文件和生产长稳门禁尚未完成。
 - 10 分钟 soak 未完整保存线程/FD 漂移汇总，1 小时和 24 小时长稳仍未执行。
 - Legacy WAR A 仍被外部数据库连接超时阻断；Legacy WAR B 只完成报告所列关键路径 L2，上传、
-  错误页、全部管理动作、长事务和完整 L3 差分仍未覆盖。
+  全部管理动作、长事务和完整 L3 差分仍未覆盖。
 - 最终候选仍不支持“内存低 30%”“吞吐不低于或高于 Tomcat”或“广义更快”的发布声明。
 - raw ingress 仍只有全局预算和单请求体上限，没有独立的每连接公平份额；单连接可以占用全局
   预算，但不能突破全局硬边界。

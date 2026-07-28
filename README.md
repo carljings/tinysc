@@ -1,7 +1,5 @@
 # tinysc
 
-[![Java 8 CI](https://github.com/carljings/tinysc/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/carljings/tinysc/actions/workflows/ci.yml)
-
 tinysc 是一个面向单 WAR 部署的轻量 Servlet 容器。
 
 当前开发线是 `1.x Classic`：Java 8、Servlet 3.1、`javax.servlet`。`2.x Modern`
@@ -45,8 +43,11 @@ java -jar src/tinysc-launcher/target/tinysc-1.0.0-alpha-SNAPSHOT.jar \
 ## 当前证据
 
 tinysc 用单进程单 WAR、事务式就绪、SHA-256 展开缓存和精简线程模型换取更短、更可预测的
-启动链。当前分支已在 Java 8 下通过 `mvn -B -ntp clean verify`，共 177 项测试；同一 Probe WAR
-的 `@MultipartConfig` 回退与显式配置优先级也已和 Tomcat 8.5.100 完成本地差分。下方 Probe WAR
+启动链。当前分支已在 Java 8 下通过 `mvn -B -ntp clean verify`，共 206 项测试；同一 Probe WAR
+的 `@MultipartConfig` 回退与显式配置优先级、以及同步 error-page slice 的差分也已和 Tomcat 8.5.100
+完成。本轮 error-page 结果只覆盖未提交前的同步路径：`sendError(404)`、`RuntimeException`、
+`ServletException(IOException root cause)` 与 Tomcat 对齐，失败 custom handler 则按 TinySC 的单次安全
+`500` 兜底。下方 Probe WAR
 性能数据仍来自 2026-07-22 最终候选（当时为 157 项测试），尚未包含 multipart 基线的重新测量。
 该候选在
 同机同参、每个并发等级 5 个独立进程且交替容器顺序的中位数如下；成对数据均为

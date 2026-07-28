@@ -144,7 +144,48 @@ public final class WebXmlParser {
                 result.welcomeFile(welcome);
             }
         }
+        for (Element element : children(root, "error-page")) {
+            result.errorPage(errorPage(element));
+        }
         return result.build();
+    }
+
+    private static WebAppDescriptor.ErrorPageDefinition errorPage(Element element) {
+        List<Element> codes = children(element, "error-code");
+        List<Element> exceptions = children(element, "exception-type");
+        List<Element> locations = children(element, "location");
+        if (codes.size() > 1 || exceptions.size() > 1
+                || (!codes.isEmpty() && !exceptions.isEmpty())) {
+            throw new IllegalArgumentException(
+                    "error-page must declare at most one error-code or exception-type");
+        }
+        if (locations.size() != 1) {
+            throw new IllegalArgumentException(
+                    "error-page must declare exactly one location");
+        }
+
+        Integer code = null;
+        if (!codes.isEmpty()) {
+            String rawCode = codes.get(0).getTextContent().trim();
+            if (!rawCode.matches("[0-9]{3}")) {
+                throw new IllegalArgumentException(
+                        "error-code must contain exactly three digits");
+            }
+            code = Integer.valueOf(rawCode);
+            if (code.intValue() == 0) {
+                throw new IllegalArgumentException("error-code must not be zero");
+            }
+        }
+
+        String exceptionType = null;
+        if (!exceptions.isEmpty()) {
+            exceptionType = exceptions.get(0).getTextContent().trim();
+            if (exceptionType.isEmpty()) {
+                throw new IllegalArgumentException("exception-type must not be empty");
+            }
+        }
+        return new WebAppDescriptor.ErrorPageDefinition(
+                code, exceptionType, locations.get(0).getTextContent().trim());
     }
 
     private static WebAppDescriptor.MultipartConfigDefinition multipartConfig(Element servlet) {

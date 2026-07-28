@@ -200,6 +200,51 @@ class ProbeWarIntegrationTest {
             assertTrue(forwarded.body.contains("pathInfo=/forwarded"));
             assertTrue(forwarded.body.contains("name=Forward"));
 
+            Response sendError404 = get(
+                    port, "/probe/error/send-error-404", null);
+            assertEquals(404, sendError404.status);
+            assertEquals("applied", sendError404.errorFilterHeader);
+            assertEquals(errorBody(
+                    "status-404", 404, "probe-missing",
+                    "/probe/error/send-error-404", null, null), sendError404.body);
+            assertContentLengthMatches(sendError404);
+
+            Response setStatus404 = get(
+                    port, "/probe/error/set-status-404", null);
+            assertEquals(404, setStatus404.status);
+            assertEquals(null, setStatus404.errorFilterHeader);
+            assertEquals("plain-status-404", setStatus404.body);
+            assertContentLengthMatches(setStatus404);
+
+            Response runtimeException = get(
+                    port, "/probe/error/runtime-exception", null);
+            assertEquals(500, runtimeException.status);
+            assertEquals("applied", runtimeException.errorFilterHeader);
+            assertEquals(errorBody(
+                    "runtime-exception", 500, "probe-runtime",
+                    "/probe/error/runtime-exception",
+                    "java.lang.RuntimeException:probe-runtime",
+                    "java.lang.RuntimeException"), runtimeException.body);
+            assertContentLengthMatches(runtimeException);
+
+            Response wrappedIOException = get(
+                    port, "/probe/error/servlet-io-exception", null);
+            assertEquals(500, wrappedIOException.status);
+            assertEquals("applied", wrappedIOException.errorFilterHeader);
+            assertEquals(errorBody(
+                    "io-root-cause", 500, "probe-servlet",
+                    "/probe/error/servlet-io-exception",
+                    "java.io.IOException:probe-io",
+                    "java.io.IOException"), wrappedIOException.body);
+            assertContentLengthMatches(wrappedIOException);
+
+            Response failingErrorPage = get(
+                    port, "/probe/error/failing-error-page", null);
+            assertEquals(500, failingErrorPage.status);
+            assertEquals("applied", failingErrorPage.errorFilterHeader);
+            assertEquals("Internal Server Error", failingErrorPage.body);
+            assertContentLengthMatches(failingErrorPage);
+
             assertEquals(404, get(port, "/probe/WEB-INF/web.xml", null).status);
             assertEquals(404, get(port, "/probe/WEB-INF/jar-secret.txt", null).status);
             assertEquals(404, get(port, "/probe/classes-only.html", null).status);
@@ -238,6 +283,7 @@ class ProbeWarIntegrationTest {
         String body = input == null ? "" : read(input);
         return new Response(status, body, connection.getHeaderField("X-TinySC-Filter"),
                 connection.getHeaderField("X-TinySC-Forward-Filter"),
+                connection.getHeaderField("X-TinySC-Error-Filter"),
                 connection.getHeaderField("Set-Cookie"),
                 connection.getHeaderField("Content-Length"),
                 connection.getHeaderField("Last-Modified"));
@@ -276,9 +322,29 @@ class ProbeWarIntegrationTest {
         return new Response(status, responseBody,
                 connection.getHeaderField("X-TinySC-Filter"),
                 connection.getHeaderField("X-TinySC-Forward-Filter"),
+                connection.getHeaderField("X-TinySC-Error-Filter"),
                 connection.getHeaderField("Set-Cookie"),
                 connection.getHeaderField("Content-Length"),
                 connection.getHeaderField("Last-Modified"));
+    }
+
+    private static String errorBody(
+            String view, int status, String message, String requestUri,
+            String exception, String exceptionType) {
+        return "ERROR_VIEW=" + view
+                + ";ERROR_DISPATCHER_TYPE=ERROR"
+                + ";ERROR_STATUS_CODE=" + status
+                + ";ERROR_MESSAGE=" + message
+                + ";ERROR_REQUEST_URI=" + requestUri
+                + ";ERROR_SERVLET_NAME=errorEntryServlet"
+                + ";ERROR_EXCEPTION=" + exception
+                + ";ERROR_EXCEPTION_TYPE=" + exceptionType;
+    }
+
+    private static void assertContentLengthMatches(Response response) {
+        assertNotNull(response.contentLength);
+        assertEquals(response.body.getBytes(StandardCharsets.UTF_8).length,
+                Integer.parseInt(response.contentLength));
     }
 
     private static String repeat(char value, int count) {
@@ -303,17 +369,19 @@ class ProbeWarIntegrationTest {
         private final String body;
         private final String filterHeader;
         private final String forwardFilterHeader;
+        private final String errorFilterHeader;
         private final String sessionCookie;
         private final String contentLength;
         private final String lastModified;
 
         private Response(int status, String body, String filterHeader,
-                         String forwardFilterHeader, String sessionCookie, String contentLength,
-                         String lastModified) {
+                         String forwardFilterHeader, String errorFilterHeader,
+                         String sessionCookie, String contentLength, String lastModified) {
             this.status = status;
             this.body = body;
             this.filterHeader = filterHeader;
             this.forwardFilterHeader = forwardFilterHeader;
+            this.errorFilterHeader = errorFilterHeader;
             this.sessionCookie = sessionCookie;
             this.contentLength = contentLength;
             this.lastModified = lastModified;

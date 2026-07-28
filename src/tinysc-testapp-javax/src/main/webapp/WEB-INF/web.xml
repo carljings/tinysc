@@ -13,11 +13,20 @@
         <filter-class>example.tinysc.probe.ProbeFilter</filter-class>
         <async-supported>true</async-supported>
     </filter>
+    <filter>
+        <filter-name>errorDispatchFilter</filter-name>
+        <filter-class>example.tinysc.probe.ErrorDispatchFilter</filter-class>
+    </filter>
     <filter-mapping>
         <filter-name>probeFilter</filter-name>
         <url-pattern>/*</url-pattern>
         <dispatcher>REQUEST</dispatcher>
         <dispatcher>FORWARD</dispatcher>
+    </filter-mapping>
+    <filter-mapping>
+        <filter-name>errorDispatchFilter</filter-name>
+        <url-pattern>/*</url-pattern>
+        <dispatcher>ERROR</dispatcher>
     </filter-mapping>
 
     <servlet>
@@ -92,10 +101,52 @@
         <url-pattern>/benchmark</url-pattern>
     </servlet-mapping>
 
+    <servlet>
+        <servlet-name>errorEntryServlet</servlet-name>
+        <servlet-class>example.tinysc.probe.ErrorEntryServlet</servlet-class>
+    </servlet>
+    <servlet-mapping>
+        <servlet-name>errorEntryServlet</servlet-name>
+        <url-pattern>/error/*</url-pattern>
+    </servlet-mapping>
+
+    <servlet>
+        <servlet-name>errorViewServlet</servlet-name>
+        <servlet-class>example.tinysc.probe.ErrorViewServlet</servlet-class>
+    </servlet>
+    <servlet-mapping>
+        <servlet-name>errorViewServlet</servlet-name>
+        <url-pattern>/errors/*</url-pattern>
+    </servlet-mapping>
+
     <session-config>
         <session-timeout>5</session-timeout>
     </session-config>
     <welcome-file-list>
         <welcome-file>index.html</welcome-file>
     </welcome-file-list>
+
+    <error-page>
+        <error-code>404</error-code>
+        <location>/errors/status-404</location>
+    </error-page>
+    <error-page>
+        <exception-type>java.lang.RuntimeException</exception-type>
+        <location>/errors/runtime-exception</location>
+    </error-page>
+    <error-page>
+        <exception-type>java.io.IOException</exception-type>
+        <location>/errors/io-root-cause</location>
+    </error-page>
+    <error-page>
+        <exception-type>java.lang.UnsupportedOperationException</exception-type>
+        <location>/errors/failing-error-page</location>
+    </error-page>
+    <error-page>
+        <error-code>500</error-code>
+        <location>/errors/status-500</location>
+    </error-page>
+    <error-page>
+        <location>/errors/default</location>
+    </error-page>
 </web-app>

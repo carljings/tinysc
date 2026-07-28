@@ -117,6 +117,20 @@ public final class ContainerResponse {
         committed = true;
     }
 
+    public void prepareErrorBodyRewrite() {
+        committed = false;
+        body.reset();
+        removeHeader("Content-Length");
+    }
+
+    public void prepareErrorBodyRewrite(String restoredContentType) {
+        prepareErrorBodyRewrite();
+        removeHeader("Content-Type");
+        if (restoredContentType != null) {
+            setHeader("Content-Type", restoredContentType);
+        }
+    }
+
     private void ensureNotCommitted() {
         if (committed) {
             throw new IllegalStateException("response is already committed");
@@ -131,6 +145,18 @@ public final class ContainerResponse {
             }
         }
         return -1;
+    }
+
+    private void removeHeader(String name) {
+        int index = findHeaderIndex(name);
+        if (index < 0) {
+            return;
+        }
+        int moved = headerCount - index - 1;
+        if (moved > 0) {
+            System.arraycopy(headers, index + 1, headers, index, moved);
+        }
+        headers[--headerCount] = null;
     }
 
     private void ensureHeaderCapacity(int capacity) {

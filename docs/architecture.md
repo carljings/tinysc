@@ -15,7 +15,7 @@ WAR，以较少的层级提供 HTTP 接入、WAR 部署、Servlet 生命周期�
 - HTTP/1.1 请求接入及有界资源控制。
 - WAR 与 exploded directory 部署；挂载 `WEB-INF/lib` Resource JAR，并保持 Web 根优先。
 - `web.xml 3.0/3.1`、Servlet、Filter、Listener、SCI。
-- Session、Dispatch、Async 与 Servlet 3.1 非阻塞 I/O。
+- Session、Dispatch、同步 `web.xml` error-page、Async 与 Servlet 3.1 非阻塞 I/O。
 - 单进程单 WAR 的启动、优雅停止和健康状态。
 - Java 8 字节码和 `javax.servlet` namespace 不变。
 
@@ -24,6 +24,7 @@ WAR，以较少的层级提供 HTTP 接入、WAR 部署、Servlet 生命周期�
 - 多 Host、多 WAR、AJP、远程管理后台和自动热部署。
 - 集群 Session、Session 持久化和应用代码沙箱。
 - JSP 内置支持；JSP 以后作为独立可选模块评估。
+- 已提交响应恢复、Async error dispatch、JSP error page 和完整 Servlet 3.1 / TCK 语义。
 
 ## 3. 模块
 
@@ -151,6 +152,13 @@ worker 构造 `ContainerRequest` / `ContainerResponse` / `ContainerExchange` 后
 解析器从 `ContainerRequest.bodyStream()` 读取现有聚合 body，执行请求、文件、Part 数和 Part Header
 限额，阈值以上内容写入 ServletContext 临时目录，并在同步请求结束或 Async 真正完成后删除。
 这条路径没有额外复制整份 body，但传输层仍会先完整聚合，因此当前不是流式上传。
+
+同步 error-page 走的是同一类受控缓冲重写。`sendError(...)` 和未捕获异常只会在响应尚未把 bytes
+写到网络时进入 error dispatch；`setStatus(...)` 本身不会触发。TinySC 会按 exact status、异常最近
+superclass、`ServletException` outer exception 再 root cause、status `500` 和 default error-page 的顺序
+选页，进入自定义错误页时设置标准 `RequestDispatcher.ERROR_*` 属性、只匹配 `DispatcherType.ERROR`
+的 Filter，并清掉旧 body 与 `Content-Length`，同时恢复原始 `Content-Type`。错误页失败时只回退一次
+安全 `500`，不递归选择。
 
 单 WAR 默认创建 `min(4, CPU)` 个 I/O 线程；阻塞业务代码进入独立、有界的 worker 池。两者都可在启动
 参数中明确设置，性能报告必须记录实际值。

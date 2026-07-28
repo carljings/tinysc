@@ -16,5 +16,6 @@
 | [0012](0012-bounded-multipart-parsing.md) | Accepted | 有界 multipart 解析 |
 | [0013](0013-apache-2-license.md) | Accepted | 采用 Apache License 2.0 |
 | [0014](0014-tomcat-compatible-multipart-annotation.md) | Accepted | Tomcat 兼容的 multipart 注解回退 |
+| [0015](0015-synchronous-error-page-dispatch.md) | Accepted | 同步 error-page 分发 |
 
 编号一旦发布不得复用。决策被替代时保留原文件并标记 Superseded。

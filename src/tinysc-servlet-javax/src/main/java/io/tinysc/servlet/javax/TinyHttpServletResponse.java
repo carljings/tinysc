@@ -7,6 +7,7 @@ import javax.servlet.WriteListener;
 import javax.servlet.http.Cookie;
 import javax.servlet.http.HttpServletResponse;
 import java.io.IOException;
+import java.io.OutputStream;
 import java.io.OutputStreamWriter;
 import java.io.PrintWriter;
 import java.nio.charset.Charset;
@@ -30,6 +31,7 @@ final class TinyHttpServletResponse implements HttpServletResponse {
     private int bufferSize = 8192;
     private TinyOutputStream outputStream;
     private PrintWriter writer;
+    private PendingError pendingError;
 
     TinyHttpServletResponse(ContainerResponse response) {
         this.response = response;
@@ -89,16 +91,21 @@ final class TinyHttpServletResponse implements HttpServletResponse {
     @Override
     public void sendError(int status, String message) throws IOException {
         ensureNotCommitted();
-        resetBuffer();
+        String originalContentType = contentType;
+        String originalContentTypeHeader = response.firstHeader("Content-Type");
+        flushWriter();
+        response.prepareErrorBodyRewrite();
         setStatus(status);
-        setContentType("text/plain");
-        getWriter().write(message == null ? statusMessage(status) : message);
-        flushBuffer();
+        setDirectPlainTextContentType();
+        pendingError = new PendingError(
+                status, message, originalContentType, originalContentTypeHeader);
+        writeDirect(message == null ? statusMessage(status) : message);
+        response.commit();
     }
 
     @Override
     public void sendError(int status) throws IOException {
-        sendError(status, statusMessage(status));
+        sendError(status, null);
     }
 
     @Override
@@ -204,7 +211,7 @@ final class TinyHttpServletResponse implements HttpServletResponse {
         }
         if (writer == null) {
             writer = new PrintWriter(new OutputStreamWriter(
-                    response.bodyStream(), Charset.forName(characterEncoding)));
+                    new ApplicationOutputStream(), Charset.forName(characterEncoding)));
             updateContentTypeHeader();
         }
         return writer;
@@ -294,6 +301,7 @@ final class TinyHttpServletResponse implements HttpServletResponse {
         locale = Locale.getDefault();
         outputStream = null;
         writer = null;
+        pendingError = null;
     }
 
     @Override
@@ -310,15 +318,65 @@ final class TinyHttpServletResponse implements HttpServletResponse {
     }
 
     void finish() {
-        if (writer != null) {
-            writer.flush();
+        flushWriter();
+    }
+
+    PendingError pendingError() {
+        return pendingError;
+    }
+
+    void prepareErrorDispatch() {
+        flushWriter();
+        if (pendingError == null) {
+            response.prepareErrorBodyRewrite();
+        } else {
+            contentType = pendingError.originalContentType();
+            response.prepareErrorBodyRewrite(
+                    pendingError.originalContentTypeHeader());
         }
+        clearApplicationOutputState();
+    }
+
+    void renderInternalServerErrorFallback() {
+        flushWriter();
+        response.prepareErrorBodyRewrite();
+        clearApplicationOutputState();
+        response.status(SC_INTERNAL_SERVER_ERROR);
+        setDirectPlainTextContentType();
+        try {
+            writeDirect(statusMessage(SC_INTERNAL_SERVER_ERROR));
+        } catch (IOException impossible) {
+            throw new IllegalStateException("in-memory response write failed", impossible);
+        }
+        response.commit();
     }
 
     private void ensureNotCommitted() {
         if (isCommitted()) {
             throw new IllegalStateException("response is already committed");
         }
+    }
+
+    private void flushWriter() {
+        if (writer != null) {
+            writer.flush();
+        }
+    }
+
+    private void clearApplicationOutputState() {
+        outputStream = null;
+        writer = null;
+        pendingError = null;
+    }
+
+    private void setDirectPlainTextContentType() {
+        contentType = "text/plain";
+        response.setHeader("Content-Type", contentType + "; charset=" + characterEncoding);
+    }
+
+    private void writeDirect(String value) throws IOException {
+        byte[] bytes = value.getBytes(Charset.forName(characterEncoding));
+        response.bodyStream().write(bytes, 0, bytes.length);
     }
 
     private void updateContentTypeHeader() {
@@ -370,6 +428,50 @@ final class TinyHttpServletResponse implements HttpServletResponse {
         }
     }
 
+    static final class PendingError {
+        private final int status;
+        private final String message;
+        private final String originalContentType;
+        private final String originalContentTypeHeader;
+
+        private PendingError(int status, String message,
+                             String originalContentType,
+                             String originalContentTypeHeader) {
+            this.status = status;
+            this.message = message;
+            this.originalContentType = originalContentType;
+            this.originalContentTypeHeader = originalContentTypeHeader;
+        }
+
+        int status() {
+            return status;
+        }
+
+        String message() {
+            return message;
+        }
+
+        String originalContentType() {
+            return originalContentType;
+        }
+
+        String originalContentTypeHeader() {
+            return originalContentTypeHeader;
+        }
+    }
+
+    private final class ApplicationOutputStream extends OutputStream {
+        @Override
+        public void write(int value) throws IOException {
+            writeApplicationBody(value);
+        }
+
+        @Override
+        public void write(byte[] bytes, int offset, int length) throws IOException {
+            writeApplicationBody(bytes, offset, length);
+        }
+    }
+
     private final class TinyOutputStream extends ServletOutputStream {
         @Override
         public boolean isReady() {
@@ -390,11 +492,24 @@ final class TinyHttpServletResponse implements HttpServletResponse {
 
         @Override
         public void write(int value) throws IOException {
-            response.bodyStream().write(value);
+            writeApplicationBody(value);
         }
 
         @Override
         public void write(byte[] bytes, int offset, int length) throws IOException {
+            writeApplicationBody(bytes, offset, length);
+        }
+    }
+
+    private void writeApplicationBody(int value) throws IOException {
+        if (pendingError == null) {
+            response.bodyStream().write(value);
+        }
+    }
+
+    private void writeApplicationBody(byte[] bytes, int offset, int length)
+            throws IOException {
+        if (pendingError == null) {
             response.bodyStream().write(bytes, offset, length);
         }
     }

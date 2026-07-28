@@ -11,6 +11,7 @@ import java.util.Map;
 
 import static org.junit.jupiter.api.Assertions.assertArrayEquals;
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
@@ -124,6 +125,48 @@ class ContainerResponseTest {
 
         response.resetBuffer();
         assertEquals(0, response.bodyBuffer().remaining());
+    }
+
+    @Test
+    void preparesCommittedBufferedResponseForErrorBodyRewrite() throws Exception {
+        ContainerResponse response = new ContainerResponse();
+        response.status(404);
+        response.setHeader("X-Test", "preserved");
+        response.setHeader("content-length", "128");
+        response.addHeader("Set-Cookie", "first=one");
+        response.addHeader("set-cookie", "second=two");
+        response.bodyStream().write(new byte[]{1, 2, 3});
+        response.commit();
+
+        response.prepareErrorBodyRewrite();
+
+        assertFalse(response.committed());
+        assertEquals(404, response.status());
+        assertEquals("preserved", response.firstHeader("X-Test"));
+        assertEquals(Arrays.asList("first=one", "second=two"),
+                response.headers().get("Set-Cookie"));
+        assertFalse(response.containsHeader("CONTENT-LENGTH"));
+        assertArrayEquals(new byte[0], response.bodyBytes());
+
+        response.setHeader("X-After", "writable");
+        response.bodyStream().write(9);
+        assertEquals("writable", response.firstHeader("X-After"));
+        assertArrayEquals(new byte[]{9}, response.bodyBytes());
+    }
+
+    @Test
+    void restoresContentTypeWhilePreparingErrorBodyRewrite() {
+        ContainerResponse response = new ContainerResponse();
+        response.setHeader("Content-Type", "text/plain");
+        response.setHeader("Content-Length", "8");
+        response.commit();
+
+        response.prepareErrorBodyRewrite("application/json; charset=UTF-8");
+
+        assertFalse(response.committed());
+        assertEquals("application/json; charset=UTF-8",
+                response.firstHeader("content-type"));
+        assertFalse(response.containsHeader("content-length"));
     }
 
 }

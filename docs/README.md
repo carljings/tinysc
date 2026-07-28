@@ -28,6 +28,7 @@
 | [acceptance/2026-07-21-legacy-war-acceptance.md](acceptance/2026-07-21-legacy-war-acceptance.md) | 两个匿名化真实 WAR 的分阶段验收证据 |
 | [acceptance/2026-07-22-legacy-war-b-cutover.md](acceptance/2026-07-22-legacy-war-b-cutover.md) | Legacy WAR B 失败回滚、兼容修复与最终受控切换证据 |
 | [acceptance/2026-07-28-multipart-probe-differential.md](acceptance/2026-07-28-multipart-probe-differential.md) | 同一 Probe WAR 在 TinySC 与 Tomcat 8 上的 XML/注解 multipart 差分 |
+| [acceptance/2026-07-28-error-page-probe-differential.md](acceptance/2026-07-28-error-page-probe-differential.md) | 同一 Probe WAR 在 TinySC 与 Tomcat 8 上的同步 error-page 差分 |
 | [adr/README.md](adr/README.md) | 架构与项目决策记录索引 |
 
 文档必须与可执行行为同步。尚未实现的能力统一标记为“计划”，不得写成已支持。

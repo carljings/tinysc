@@ -46,3 +46,10 @@ Java 17 编译但仍使用 `javax.servlet` 的应用依然选择 1.x。1.x 到 2
 完成启动和一组认证后关键路径的只读验收，切换、失败回滚和静态模板兼容修复见
 [受控切换验收](acceptance/2026-07-22-legacy-war-b-cutover.md)。上传、错误页和完整管理流程仍未覆盖，
 不能据此声明完整业务兼容。
+
+Probe WAR 的当前差分已经扩展到同步 error-page slice：`sendError(404)`、`RuntimeException`、
+`ServletException(IOException root cause)` 的 status、`ERROR` filter、正文和 `Content-Length` 与
+Tomcat 8.5.100 一致；`setStatus(404)` 不会触发自定义 error-page。失败 custom error-page 时，TinySC
+回退到单次安全 `500` 并丢弃 partial body，而 Tomcat 保留了 partial body。这个结果只证明同步、
+未提交前的 error-page 语义，不代表已完成 async error dispatch、已提交响应恢复、JSP error page 或
+TCK。

@@ -18,9 +18,11 @@ Java 21 虚拟线程仅作为 2.x 可选执行器，不提高最低运行版本�
 - multipart 基线已支持 `web.xml` / SCI 显式配置、`@MultipartConfig` 缺省回退、`Part`、表单字段、
   限额、磁盘阈值与请求结束清理；显式配置覆盖注解的行为已和 Tomcat 8.5.100 完成同 WAR 差分。
   当前请求体仍在传输层完整聚合，流式上传尚未完成。
+- 同步 error-page slice 已落地，覆盖 `sendError`、未捕获异常、`DispatcherType.ERROR`、标准 error
+  attributes 和单次安全 `500` fallback；失败 error-page 的 partial body 不再对外保留。
 - 两个内部 Legacy WAR 均通过 L0；Legacy WAR B 已达到关键路径 L2，完成登录、列表、申报、
   `page_load` 和静态模板 POST 的 Tomcat 差分，并在目标环境实际演练失败回滚后完成受控切换；
-  上传、错误页和完整管理流程仍未覆盖。Legacy WAR A 仍受数据库超时影响。
+  上传和完整管理流程仍未覆盖。Legacy WAR A 仍受数据库超时影响。
 - 首轮 Tomcat 8.5.100 对照中启动目标通过，RSS 与 p99 目标未通过。
 - worker 已改为有界弹性池，默认 `--min-workers` 从 8 下调到 2，以减少首波创建；并验证繁忙扩容、
   容量外 `503`、过载恢复和空闲回落。该 smoke 只证明状态正确，不构成与 Tomcat 的新性能对比。
@@ -33,4 +35,5 @@ Java 21 虚拟线程仅作为 2.x 可选执行器，不提高最低运行版本�
 - 当前 response 仍全量堆缓冲，真正的流式响应写、非阻塞 `WriteListener` 和每连接 raw ingress 公平份额
   仍在后续阶段。
 - 下一退出条件优先是 Legacy WAR A 在可达业务依赖下的 L1/L2、Legacy WAR B 上传与剩余关键流程、
-  error-page、async dispatch、web-fragment、真正流式响应写，以及 1 小时/24 小时长稳和独立压测端复测。
+  async error dispatch、已提交响应下的 error-page 恢复、JSP error pages、嵌套 dispatch 完整 parity、
+  web-fragment、真正流式响应写、TCK 准备，以及 1 小时/24 小时长稳和独立压测端复测。
