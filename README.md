@@ -45,7 +45,7 @@ java -jar src/tinysc-launcher/target/tinysc-1.0.0-alpha-SNAPSHOT.jar \
 ## 当前证据
 
 tinysc 用单进程单 WAR、事务式就绪、SHA-256 展开缓存和精简线程模型换取更短、更可预测的
-启动链。当前分支已在 Java 8 下通过 `mvn -B -ntp clean verify`，共 175 项测试。下方 Probe WAR
+启动链。当前分支已在 Java 8 下通过 `mvn -B -ntp clean verify`，共 176 项测试。下方 Probe WAR
 性能数据仍来自 2026-07-22 最终候选（当时为 157 项测试），尚未包含 multipart 基线的重新测量。
 该候选在
 同机同参、每个并发等级 5 个独立进程且交替容器顺序的中位数如下；成对数据均为
@@ -67,7 +67,8 @@ RSS 也未达到 1.0 所要求的低 30%，因此不是“全面快于 Tomcat”
 仍受外部数据库读取超时影响。Legacy WAR B 的授权切换结论带有资源漂移证据保留项，不等于完整
 长稳通过。公开报告已匿名化业务名称、制品指纹、本机路径、网络地址和授权标识。
 
-## 许可证状态
+## 许可证
 
-项目所有者尚未选定开源许可证。当前代码不能据此推定获得对外复制或再发布授权；首次公开发布
-前的许可证、SBOM、安全渠道和维护者门禁见 [项目治理](docs/governance.md)。
+TinySC 采用 [Apache License 2.0](LICENSE)，版权主体为 `TinySC contributors`。二进制制品同时
+携带 [NOTICE](NOTICE) 和 [第三方许可证清单](docs/licenses/README.md)。第三方组件仍受各自
+许可证约束；许可证已经确定不代表 SBOM、安全渠道、签名或 1.0 发布门禁已经完成。

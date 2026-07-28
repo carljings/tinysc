@@ -10,6 +10,7 @@
 | [development.md](development.md) | 构建环境、目录规则和开发流程 |
 | [contributing.md](contributing.md) | 贡献流程、代码边界与行为准则 |
 | [governance.md](governance.md) | 决策、维护、支持与开源发布门禁 |
+| [licenses/README.md](licenses/README.md) | shaded 二进制的第三方许可证与 NOTICE 清单 |
 | [changelog.md](changelog.md) | 用户可见变更和当前已知限制 |
 | [testing.md](testing.md) | 单测、契约、真实 WAR 与差分验收 |
 | [performance.md](performance.md) | 与 Tomcat 的公平基准、性能预算和结果格式 |
@@ -27,7 +28,7 @@
 | [acceptance/2026-07-21-legacy-war-acceptance.md](acceptance/2026-07-21-legacy-war-acceptance.md) | 两个匿名化真实 WAR 的分阶段验收证据 |
 | [acceptance/2026-07-22-legacy-war-b-cutover.md](acceptance/2026-07-22-legacy-war-b-cutover.md) | Legacy WAR B 失败回滚、兼容修复与最终受控切换证据 |
 | [acceptance/2026-07-28-multipart-probe-differential.md](acceptance/2026-07-28-multipart-probe-differential.md) | 同一 Probe WAR 在 TinySC 与 Tomcat 8 上的 multipart 成功/超限差分 |
-| [adr/README.md](adr/README.md) | 架构决策记录索引 |
+| [adr/README.md](adr/README.md) | 架构与项目决策记录索引 |
 
 文档必须与可执行行为同步。尚未实现的能力统一标记为“计划”，不得写成已支持。
 基准和 smoke 文档只用于证据归档；未达门槛前，不得把它们写成正式性能声明。

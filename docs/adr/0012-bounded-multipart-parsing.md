@@ -49,7 +49,7 @@ Servlet 调用前完整聚合请求体，因此本轮不能把基础 multipart �
 
 ### 负面
 
-- shaded 制品新增 Commons FileUpload 依赖，发布前必须纳入许可证审计和 SBOM。
+- shaded 制品新增 Commons FileUpload 依赖，已纳入第三方许可证清单；正式发布前仍必须生成 SBOM。
 - 请求体在传输层仍会先完整聚合；阈值落盘只能减少解析后的额外常驻内存，不能消除入站聚合内存。
 - `@MultipartConfig`、真正流式上传、非阻塞读取和真实 Legacy WAR 上传验收仍未完成。
 

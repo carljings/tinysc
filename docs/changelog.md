@@ -8,6 +8,9 @@ Known limitations；提交历史不能替代发布说明。
 ### Added
 
 - Java 8 / Servlet 3.1 / `javax.servlet` 的 1.x Maven 多模块基线。
+- 项目采用 Apache License 2.0，版权主体使用匿名的 `TinySC contributors`。
+- shaded launcher 固定携带项目 `LICENSE`、`NOTICE`、第三方许可证清单以及 ASM 和
+  Java Servlet API 的完整许可证文本，避免同名 `META-INF` 资源随机覆盖。
 - Netty HTTP/1.1 connector、有界 worker、严格请求校验、事务式端口开放，以及连接/请求/字节/原始入站容量和传输时限控制。
 - WAR 检查、安全展开、SHA-256 缓存、`web.xml` 解析和 WebApp 类加载器。
 - Servlet、Filter、Listener、SCI、Session、基础 Async 与 RequestDispatcher 链路。
@@ -66,7 +69,7 @@ Known limitations；提交历史不能替代发布说明。
 
 ### Verification
 
-- 当前分支在 Java 8 下执行 `mvn -B -ntp clean verify`，共 175 项测试通过。
+- 当前分支在 Java 8 下执行 `mvn -B -ntp clean verify`，共 176 项测试通过。
 - 同一 Probe WAR 在 TinySC 与 Tomcat 8.5.100 上的 multipart 成功上传均返回相同 `200` 响应体，
   65-byte 文件超过 64-byte 配置上限时均返回 `500`；证据见
   [multipart Probe WAR 差分验收](acceptance/2026-07-28-multipart-probe-differential.md)。
