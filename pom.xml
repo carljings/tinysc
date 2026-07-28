@@ -11,6 +11,22 @@
 
     <name>tinysc</name>
     <description>Lightweight single-WAR Servlet container</description>
+    <url>https://github.com/carljings/tinysc</url>
+
+    <licenses>
+        <license>
+            <name>Apache License, Version 2.0</name>
+            <url>https://www.apache.org/licenses/LICENSE-2.0.txt</url>
+            <distribution>repo</distribution>
+        </license>
+    </licenses>
+
+    <scm>
+        <connection>scm:git:https://github.com/carljings/tinysc.git</connection>
+        <developerConnection>scm:git:ssh://git@github.com/carljings/tinysc.git</developerConnection>
+        <url>https://github.com/carljings/tinysc</url>
+        <tag>HEAD</tag>
+    </scm>
 
     <modules>
         <module>src/tinysc-kernel</module>

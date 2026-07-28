@@ -36,5 +36,6 @@ tinysc:2-jdk17
 - [ ] 两个真实 WAR 达到当前里程碑等级。
 - [ ] 差分、安全、资源与长稳报告归档。
 - [ ] 源码、二进制、SBOM 和校验和可复现。
+- [ ] shaded launcher 含 `META-INF/LICENSE`、`META-INF/NOTICE` 和完整第三方许可证清单。
 - [ ] CHANGELOG、升级说明、运维文档同步。
-- [ ] 开源许可证由项目所有者明确选定。
+- [x] 开源许可证由项目所有者明确选定为 Apache License 2.0。
